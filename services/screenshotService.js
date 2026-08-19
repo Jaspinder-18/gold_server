@@ -2,8 +2,14 @@ import { chromium } from 'playwright';
 import fs from 'fs';
 import path from 'path';
 import axios from 'axios';
+import { execSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import { logger } from '../utils/logger.js';
+
+// Ensure Playwright uses local project directory for browsers if on Render
+if (!process.env.PLAYWRIGHT_BROWSERS_PATH) {
+  process.env.PLAYWRIGHT_BROWSERS_PATH = '0';
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -50,21 +56,41 @@ class ScreenshotService {
     try {
       logger.info('Initializing Playwright TradingView Browser Automation Engine...');
 
-      this.browser = await chromium.launch({
-        headless: true,
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-accelerated-2d-canvas',
-          '--no-first-run',
-          '--no-zygote',
-          '--disable-gpu',
-          '--hide-scrollbars',
-          '--mute-audio',
-          '--disable-blink-features=AutomationControlled'
-        ]
-      });
+      const launchArgs = [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--disable-gpu',
+        '--hide-scrollbars',
+        '--mute-audio',
+        '--disable-blink-features=AutomationControlled'
+      ];
+
+      try {
+        this.browser = await chromium.launch({
+          headless: true,
+          args: launchArgs
+        });
+      } catch (launchErr) {
+        if (launchErr.message.includes("Executable doesn't exist") || launchErr.message.includes('Please run the following command')) {
+          logger.warn('Playwright browser binary not found, attempting on-the-fly download...');
+          try {
+            execSync('npx playwright install chromium', { stdio: 'inherit', env: { ...process.env, PLAYWRIGHT_BROWSERS_PATH: '0' } });
+            this.browser = await chromium.launch({
+              headless: true,
+              args: launchArgs
+            });
+          } catch (instErr) {
+            logger.error(`Playwright auto-install failed: ${instErr.message}`);
+            throw launchErr;
+          }
+        } else {
+          throw launchErr;
+        }
+      }
 
       this.context = await this.browser.newContext({
         viewport: {
@@ -85,7 +111,6 @@ class ScreenshotService {
       logger.error('Failed to initialize Playwright browser worker', err);
       this.isBrowserReady = false;
       this.stats.lastError = err.message;
-      throw err;
     } finally {
       this.isInitializing = false;
     }

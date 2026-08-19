@@ -128,7 +128,11 @@ const startServer = async () => {
     await alertService.initialize(io);
 
     // 4. Initialize Isolated Playwright TradingView Screenshot Worker
-    await screenshotService.initialize();
+    try {
+      await screenshotService.initialize();
+    } catch (screenErr) {
+      logger.warn(`Screenshot service init deferred: ${screenErr.message}`);
+    }
 
     // 5. Initialize Market Data Live Feed
     await marketDataService.initialize();
