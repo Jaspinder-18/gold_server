@@ -17,6 +17,7 @@ import { marketDataService } from './services/marketDataService.js';
 import { pivotService } from './services/pivotService.js';
 import { alertService } from './services/alertService.js';
 import { screenshotService } from './services/screenshotService.js';
+import { keepAliveService } from './services/keepAliveService.js';
 
 // Route imports
 import marketRoutes from './routes/marketRoutes.js';
@@ -66,7 +67,12 @@ app.use('/api/alerts', alertRoutes);
 app.use('/api/config', configRoutes);
 app.use('/api/test', testRoutes);
 
-// Root route & Health check
+// Lightweight Health Check endpoint (no DB queries or heavy processing)
+app.get('/api/health', (req, res) => {
+  res.status(200).json({ status: 'ok' });
+});
+
+// Root route & Service status
 app.get('/api', (req, res) => {
   res.json({
     service: 'Gold (XAU/USD) TradingView Market Alert Engine',
@@ -149,6 +155,9 @@ const startServer = async () => {
       logger.info(`  TradingView Browser Engine: READY                   `);
       logger.info(`  Telegram Bot: Active [Chat: ${process.env.TELEGRAM_CHAT_ID}]`);
       logger.info(`=======================================================`);
+
+      // 7. Start Automatic Keep-Alive Service (Pings /api/health every 13 minutes)
+      keepAliveService.start(PORT);
     });
   } catch (err) {
     logger.error('Fatal Startup Error', err);
@@ -159,6 +168,7 @@ const startServer = async () => {
 // Graceful shutdown
 const gracefulShutdown = async () => {
   logger.info('Shutting down server gracefully...');
+  keepAliveService.stop();
   await screenshotService.shutdown();
   server.close(() => {
     logger.info('Server closed.');
