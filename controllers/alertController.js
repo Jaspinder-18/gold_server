@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import { MarketEvent } from '../models/MarketEvent.js';
 import { alertService } from '../services/alertService.js';
 import { screenshotService } from '../services/screenshotService.js';
+import { cloudinaryService } from '../services/cloudinaryService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -56,8 +57,11 @@ export const deleteAlert = async (req, res) => {
     }
 
     if (event) {
-      // Delete physical screenshot file if it exists
+      // Delete Cloudinary / physical screenshot file if it exists
       if (event.screenshotPath) {
+        if (event.screenshotPath.startsWith('http')) {
+          await cloudinaryService.deleteScreenshot(event.screenshotPath);
+        }
         const filename = path.basename(event.screenshotPath);
         const fullPath = path.join(SCREENSHOTS_DIR, filename);
         if (fs.existsSync(fullPath)) {

@@ -4,6 +4,7 @@ import path from 'path';
 import axios from 'axios';
 import { execSync } from 'child_process';
 import { fileURLToPath } from 'url';
+import { cloudinaryService } from './cloudinaryService.js';
 import { logger } from '../utils/logger.js';
 
 // Ensure Playwright uses local project directory for browsers if on Render
@@ -315,13 +316,27 @@ class ScreenshotService {
       fs.writeFileSync(fullPath, buffer);
       logger.info(`TradingView chart screenshot captured successfully: ${filename} (${Math.round(buffer.length / 1024)} KB)`);
 
+      // 3. Upload to Cloudinary if configured
+      let cloudinaryUrl = null;
+      if (cloudinaryService.isAvailable()) {
+        try {
+          const cldRes = await cloudinaryService.uploadScreenshot(buffer, filename);
+          if (cldRes?.url) {
+            cloudinaryUrl = cldRes.url;
+          }
+        } catch (cldErr) {
+          logger.warn(`Cloudinary upload failed (${cldErr.message}), using local path.`);
+        }
+      }
+
       // Enforce strict max 6 screenshots retention limit
       this.enforceMaxScreenshots(6);
 
       return {
         filename,
         fullPath,
-        relativePath,
+        relativePath: cloudinaryUrl || relativePath,
+        cloudinaryUrl,
         buffer
       };
     } catch (err) {
