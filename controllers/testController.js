@@ -3,6 +3,7 @@ import { telegramService } from '../services/telegramService.js';
 import { screenshotService } from '../services/screenshotService.js';
 import { marketDataService } from '../services/marketDataService.js';
 import { pivotService } from '../services/pivotService.js';
+import { MarketEvent } from '../models/MarketEvent.js';
 import { logger } from '../utils/logger.js';
 
 export const triggerTestAlert = async (req, res) => {
@@ -47,18 +48,29 @@ export const captureLiveScreenshot = async (req, res) => {
       isTest: true
     });
 
+    const screenshotPath = screenshotData.cloudinaryUrl || screenshotData.relativePath;
+
+    // Save manual capture to MongoDB so it persists across refreshes
+    const event = await MarketEvent.create({
+      symbol: symbol || 'XAUUSD',
+      level: 'MANUAL',
+      levelPrice: currentPrice,
+      currentPrice,
+      tolerance: config.tolerance || 0.20,
+      screenshotPath,
+      telegramStatus: 'MANUAL_CAPTURE',
+      triggerReason: `Manual TradingView screenshot capture (${dynamicTimeframe}m, ${dynamicRange} range, ${dynamicBarSpacing}px barSpacing)`,
+      timestamp: new Date(),
+      isTest: true
+    });
+
+    // Enforce strict 6 history limit in MongoDB and disk
+    await alertService.enforceMaxHistory(6);
+
     res.json({
       success: true,
-      message: 'TradingView screenshot captured successfully.',
-      data: {
-        filename: screenshotData.filename,
-        relativePath: screenshotData.relativePath,
-        cloudinaryUrl: screenshotData.cloudinaryUrl,
-        timeframe: dynamicTimeframe,
-        range: dynamicRange,
-        barSpacing: dynamicBarSpacing,
-        bytes: screenshotData.buffer ? screenshotData.buffer.length : 0
-      }
+      message: 'TradingView screenshot captured and saved successfully.',
+      data: event
     });
   } catch (err) {
     logger.error('Error capturing manual chart screenshot', err);

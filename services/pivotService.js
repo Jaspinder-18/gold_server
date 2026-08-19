@@ -50,15 +50,35 @@ class PivotService {
   async updateManualConfig(updates) {
     if (!this.config) await this.initialize();
     
-    Object.keys(updates).forEach(key => {
-      if (this.config[key] !== undefined && updates[key] !== undefined) {
-        this.config[key] = updates[key];
+    const numericFields = ['r3', 'r2', 'r1', 'pivot', 's1', 's2', 's3', 'tolerance', 'retriggerDistance', 'barSpacing'];
+    const stringFields = ['symbol', 'tradingViewTicker', 'customChartUrl', 'chartTimeframe', 'chartRange'];
+    const booleanFields = ['enabled', 'autoCalculatePivot', 'telegramAlertsEnabled'];
+
+    numericFields.forEach(k => {
+      if (updates[k] !== undefined && updates[k] !== null && updates[k] !== '') {
+        this.config[k] = parseFloat(updates[k]);
       }
     });
 
+    stringFields.forEach(k => {
+      if (updates[k] !== undefined && updates[k] !== null) {
+        this.config[k] = String(updates[k]);
+      }
+    });
+
+    booleanFields.forEach(k => {
+      if (updates[k] !== undefined && updates[k] !== null) {
+        this.config[k] = Boolean(updates[k]);
+      }
+    });
+
+    if (Array.isArray(updates.monitoredLevels)) {
+      this.config.monitoredLevels = updates.monitoredLevels;
+    }
+
     this.config.lastCalculatedAt = new Date();
     await this.config.save();
-    logger.info('Pivot Configuration updated.');
+    logger.info(`Pivot Configuration updated. BarSpacing: ${this.config.barSpacing}, Range: ${this.config.chartRange}, Timeframe: ${this.config.chartTimeframe}`);
     return this.config;
   }
 
@@ -74,8 +94,9 @@ class PivotService {
         tolerance: 0.20,
         retriggerDistance: 1.00,
         monitoredLevels: ['R3', 'R2', 'S2', 'S3'],
-        chartTimeframe: '5',
-        chartRange: '2D',
+        chartTimeframe: '15',
+        chartRange: '1D',
+        barSpacing: 22,
         telegramAlertsEnabled: true
       };
     }
