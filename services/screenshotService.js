@@ -192,18 +192,26 @@ class ScreenshotService {
       else if (r === '3D') startTime -= 2 * 86400000;
       else if (r === '5D') startTime -= 4 * 86400000;
 
-      const url = `https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval=${intervalBinance}&startTime=${startTime}&limit=500`;
-      const res = await axios.get(url, { timeout: 6000 });
+      const urls = [
+        `https://data-api.binance.vision/api/v3/klines?symbol=PAXGUSDT&interval=${intervalBinance}&startTime=${startTime}&limit=500`,
+        `https://api.binance.us/api/v3/klines?symbol=PAXGUSDT&interval=${intervalBinance}&startTime=${startTime}&limit=500`,
+        `https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval=${intervalBinance}&startTime=${startTime}&limit=500`
+      ];
 
-      if (res.data && Array.isArray(res.data) && res.data.length > 0) {
-        return res.data.map(k => ({
-          time: Math.floor(k[0] / 1000),
-          open: parseFloat(k[1]),
-          high: parseFloat(k[2]),
-          low: parseFloat(k[3]),
-          close: parseFloat(k[4]),
-          volume: parseFloat(k[5])
-        }));
+      for (const url of urls) {
+        try {
+          const res = await axios.get(url, { timeout: 4500 });
+          if (res.data && Array.isArray(res.data) && res.data.length > 0) {
+            return res.data.map(k => ({
+              time: Math.floor(k[0] / 1000),
+              open: parseFloat(k[1]),
+              high: parseFloat(k[2]),
+              low: parseFloat(k[3]),
+              close: parseFloat(k[4]),
+              volume: parseFloat(k[5])
+            }));
+          }
+        } catch (e) {}
       }
     } catch (err) {
       logger.warn(`Failed to fetch fresh session klines (${err.message}), using fallback.`);
@@ -231,18 +239,20 @@ class ScreenshotService {
       timestamp = new Date(),
       pivotConfig = {},
       timeframe,
-      range
+      range,
+      barSpacing
     } = alertData;
 
     const dynamicInterval = String(timeframe || pivotConfig?.chartTimeframe || '15');
     const dynamicRange = String(range || pivotConfig?.chartRange || '1D');
+    const dynamicBarSpacing = Number(barSpacing || pivotConfig?.barSpacing || (dynamicRange === '1D' ? 22 : (dynamicRange === '2D' ? 14 : (dynamicRange === '3D' ? 9 : 6))));
 
     const timestampClean = Date.now();
     const filename = `alert-${level.toLowerCase()}-${timestampClean}.png`;
     const fullPath = path.join(SCREENSHOTS_DIR, filename);
     const relativePath = `/screenshots/${filename}`;
 
-    logger.info(`📸 Capturing clean TradingView chart (${dynamicInterval}m, ${dynamicRange} range) for ${level} alert at $${currentPrice}...`);
+    logger.info(`📸 Capturing clean TradingView chart (${dynamicInterval}m, ${dynamicRange} range, ${dynamicBarSpacing}px barSpacing) for ${level} alert at $${currentPrice}...`);
 
     let page = null;
     try {
@@ -291,6 +301,7 @@ class ScreenshotService {
         ticker: symbol || 'OANDA:XAUUSD',
         interval: dynamicInterval,
         chartRange: dynamicRange,
+        barSpacing: dynamicBarSpacing,
         level,
         levelPrice,
         currentPrice,
@@ -378,6 +389,7 @@ class ScreenshotService {
     ticker,
     interval,
     chartRange = '1D',
+    barSpacing = 22,
     level,
     levelPrice,
     currentPrice,
@@ -658,12 +670,7 @@ class ScreenshotService {
 
   <script>
     const container = document.getElementById('chart_container');
-    // Dynamic bar spacing based on chart range (1D, 2D, 3D, 5D) for tall, bold, zoomed candles
-    const chartRangeStr = "${String(chartRange).toUpperCase()}";
-    let dynamicBarSpacing = 22; // 1D: Large, zoomed, prominent candles
-    if (chartRangeStr === '2D') dynamicBarSpacing = 14;
-    else if (chartRangeStr === '3D') dynamicBarSpacing = 9;
-    else if (chartRangeStr === '5D') dynamicBarSpacing = 6;
+    const dynamicBarSpacing = Number(${Number(barSpacing) || 22});
 
     const chart = LightweightCharts.createChart(container, {
       width: container.clientWidth || 1280,

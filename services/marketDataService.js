@@ -237,25 +237,32 @@ class MarketDataService extends EventEmitter {
   }
 
   async fetchHistoricalKlines(count = 120) {
-    try {
-      const res = await axios.get(
-        `https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval=5m&limit=${count}`,
-        { timeout: 5000 }
-      );
-      if (res.data && Array.isArray(res.data)) {
-        this.klines = res.data.map(k => ({
-          time: Math.floor(k[0] / 1000),
-          open: parseFloat(k[1]),
-          high: parseFloat(k[2]),
-          low: parseFloat(k[3]),
-          close: parseFloat(k[4]),
-          volume: parseFloat(k[5])
-        }));
-        logger.info(`Loaded ${this.klines.length} historical 5m candlesticks for chart rendering.`);
+    const urls = [
+      `https://data-api.binance.vision/api/v3/klines?symbol=PAXGUSDT&interval=5m&limit=${count}`,
+      `https://api.binance.us/api/v3/klines?symbol=PAXGUSDT&interval=5m&limit=${count}`,
+      `https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval=5m&limit=${count}`
+    ];
+
+    for (const url of urls) {
+      try {
+        const res = await axios.get(url, { timeout: 4000 });
+        if (res.data && Array.isArray(res.data) && res.data.length > 0) {
+          this.klines = res.data.map(k => ({
+            time: Math.floor(k[0] / 1000),
+            open: parseFloat(k[1]),
+            high: parseFloat(k[2]),
+            low: parseFloat(k[3]),
+            close: parseFloat(k[4]),
+            volume: parseFloat(k[5])
+          }));
+          logger.info(`Loaded ${this.klines.length} historical 5m candlesticks from ${url.split('?')[0]}.`);
+          return;
+        }
+      } catch (err) {
+        // try next url
       }
-    } catch (err) {
-      logger.warn(`Failed to fetch historical klines: ${err.message}`);
     }
+    logger.warn('Could not reach remote klines API, initialized live session candle buffer.');
   }
 
   startPolling() {

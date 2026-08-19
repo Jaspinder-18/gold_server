@@ -23,8 +23,9 @@ class PivotService {
         tolerance: parseFloat(process.env.LEVEL_TOUCH_TOLERANCE || '0.20'),
         retriggerDistance: parseFloat(process.env.RETRIGGER_DISTANCE || '1.00'),
         monitoredLevels: ['R3', 'R2', 'S2', 'S3'],
-        chartTimeframe: '5',
-        chartRange: '2D',
+        chartTimeframe: '15',
+        chartRange: '1D',
+        barSpacing: 22,
         telegramAlertsEnabled: true,
         lastCalculatedAt: new Date()
       });
@@ -35,7 +36,8 @@ class PivotService {
       config.r2 = 4432.84;
       config.s2 = 4300.45;
       config.s3 = 4259.54;
-      if (!config.chartRange) config.chartRange = '2D';
+      if (!config.chartRange) config.chartRange = '1D';
+      if (!config.barSpacing) config.barSpacing = 22;
       config.autoCalculatePivot = false;
       await config.save();
     }

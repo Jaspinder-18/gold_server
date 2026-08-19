@@ -25,13 +25,14 @@ export const triggerTestAlert = async (req, res) => {
 
 export const captureLiveScreenshot = async (req, res) => {
   try {
-    const { level = 'MANUAL', symbol, timeframe, range } = req.body;
+    const { level = 'MANUAL', symbol, timeframe, range, barSpacing } = req.body;
     const config = pivotService.getConfig();
     const currentPrice = marketDataService.getCurrentPrice() || 4442.30;
-    const dynamicTimeframe = String(timeframe || config.chartTimeframe || '5');
-    const dynamicRange = String(range || config.chartRange || '2D');
+    const dynamicTimeframe = String(timeframe || config.chartTimeframe || '15');
+    const dynamicRange = String(range || config.chartRange || '1D');
+    const dynamicBarSpacing = Number(barSpacing || config.barSpacing || 22);
     
-    logger.info(`Capturing on-demand TradingView chart screenshot (${dynamicTimeframe}m, ${dynamicRange} range) for ${level}...`);
+    logger.info(`Capturing on-demand TradingView chart screenshot (${dynamicTimeframe}m, ${dynamicRange} range, ${dynamicBarSpacing}px barSpacing) for ${level}...`);
     const screenshotData = await screenshotService.generateChartScreenshot({
       symbol: symbol || process.env.TRADINGVIEW_TICKER || 'OANDA:XAUUSD',
       level,
@@ -40,6 +41,7 @@ export const captureLiveScreenshot = async (req, res) => {
       tolerance: config.tolerance || 0.20,
       timeframe: dynamicTimeframe,
       range: dynamicRange,
+      barSpacing: dynamicBarSpacing,
       pivotConfig: config,
       timestamp: new Date(),
       isTest: true
@@ -51,8 +53,10 @@ export const captureLiveScreenshot = async (req, res) => {
       data: {
         filename: screenshotData.filename,
         relativePath: screenshotData.relativePath,
+        cloudinaryUrl: screenshotData.cloudinaryUrl,
         timeframe: dynamicTimeframe,
         range: dynamicRange,
+        barSpacing: dynamicBarSpacing,
         bytes: screenshotData.buffer ? screenshotData.buffer.length : 0
       }
     });

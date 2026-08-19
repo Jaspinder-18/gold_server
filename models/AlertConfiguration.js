@@ -22,7 +22,11 @@ const AlertConfigurationSchema = new mongoose.Schema({
   chartRange: {
     type: String,
     enum: ['1D', '2D', '3D', '5D'],
-    default: '2D'
+    default: '1D'
+  },
+  barSpacing: {
+    type: Number,
+    default: 22
   },
   enabled: {
     type: Boolean,

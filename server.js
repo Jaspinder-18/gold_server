@@ -30,6 +30,9 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const server = http.createServer(app);
 
+// Enable trust proxy for Render / Cloud reverse proxies
+app.set('trust proxy', 1);
+
 // Socket.IO Setup
 const io = new SocketIOServer(server, {
   cors: {
