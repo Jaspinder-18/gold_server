@@ -25,12 +25,12 @@ class PivotService extends EventEmitter {
           tradingViewTicker: 'OANDA:XAUUSD',
           customChartUrl: 'https://www.tradingview.com/chart/hRhqMpmT/?symbol=OANDA%3AXAUUSD',
           enabled: true,
-          autoCalculatePivot: true,
+          autoCalculatePivot: false,
           pivotType: 'FIBONACCI',
-          r3: 4545.20,
-          r2: 4527.71,
-          s2: 4471.13,
-          s3: 4453.64,
+          r3: 4657.02,
+          r2: 4580.75,
+          s2: 4333.97,
+          s3: 4257.70,
           tolerance: parseFloat(process.env.LEVEL_TOUCH_TOLERANCE || '0.20'),
           retriggerDistance: parseFloat(process.env.RETRIGGER_DISTANCE || '1.00'),
           monitoredLevels: ['R3', 'R2', 'S2', 'S3'],
@@ -40,9 +40,12 @@ class PivotService extends EventEmitter {
           telegramAlertsEnabled: true,
           lastCalculatedAt: new Date()
         });
-        logger.info('Created Gold Alert Configuration in MongoDB with real-time level tracking.');
       } else {
-        config.autoCalculatePivot = true;
+        config.r3 = 4657.02;
+        config.r2 = 4580.75;
+        config.s2 = 4333.97;
+        config.s3 = 4257.70;
+        config.customChartUrl = 'https://www.tradingview.com/chart/hRhqMpmT/?symbol=OANDA%3AXAUUSD';
         if (!config.chartRange) config.chartRange = '1D';
         if (!config.barSpacing) config.barSpacing = 22;
         await config.save();
@@ -50,31 +53,29 @@ class PivotService extends EventEmitter {
 
       this.config = config;
     } catch (err) {
-      logger.warn(`Database config load deferred: ${err.message}. Using in-memory configuration.`);
-      if (!this.config) {
-        this.config = {
-          symbol: 'XAUUSD',
-          tradingViewTicker: 'OANDA:XAUUSD',
-          enabled: true,
-          autoCalculatePivot: true,
-          pivotType: 'FIBONACCI',
-          r3: 4545.20,
-          r2: 4527.71,
-          s2: 4471.13,
-          s3: 4453.64,
-          tolerance: 0.20,
-          retriggerDistance: 1.00,
-          monitoredLevels: ['R3', 'R2', 'S2', 'S3'],
-          chartTimeframe: '15',
-          chartRange: '1D',
-          barSpacing: 22,
-          telegramAlertsEnabled: true,
-          save: async () => {}
-        };
-      }
+      logger.warn(`Database config load deferred: ${err.message}. Using exact TradingView configuration.`);
+      this.config = {
+        symbol: 'XAUUSD',
+        tradingViewTicker: 'OANDA:XAUUSD',
+        enabled: true,
+        autoCalculatePivot: false,
+        pivotType: 'FIBONACCI',
+        r3: 4657.02,
+        r2: 4580.75,
+        s2: 4333.97,
+        s3: 4257.70,
+        tolerance: 0.20,
+        retriggerDistance: 1.00,
+        monitoredLevels: ['R3', 'R2', 'S2', 'S3'],
+        chartTimeframe: '15',
+        chartRange: '1D',
+        barSpacing: 22,
+        telegramAlertsEnabled: true,
+        save: async () => {}
+      };
     }
 
-    logger.info(`Pivot Levels Active -> R3: ${this.config.r3}, R2: ${this.config.r2}, S2: ${this.config.s2}, S3: ${this.config.s3} (Real-Time Auto-Calculation: ACTIVE)`);
+    logger.info(`Pivot Levels Active -> R3: ${this.config.r3}, R2: ${this.config.r2}, S2: ${this.config.s2}, S3: ${this.config.s3}`);
     return this.config;
   }
 
