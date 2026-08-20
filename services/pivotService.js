@@ -82,9 +82,11 @@ class PivotService extends EventEmitter {
   async autoRecalculateFromMarket(marketData) {
     if (!this.config) await this.initialize();
     if (!marketData || !marketData.price) return this.config;
+    if (this.config.autoCalculatePivot === false) return this.config;
+
     const price = parseFloat(marketData.price);
-    const high = marketData.high24h && marketData.high24h > price ? parseFloat(marketData.high24h) : parseFloat((price + 32.0).toFixed(2));
-    const low = marketData.low24h && marketData.low24h < price ? parseFloat(marketData.low24h) : parseFloat((price - 32.0).toFixed(2));
+    const high = marketData.high24h && marketData.high24h > price ? parseFloat(marketData.high24h) : parseFloat((price + 25.0).toFixed(2));
+    const low = marketData.low24h && marketData.low24h < price ? parseFloat(marketData.low24h) : parseFloat((price - 25.0).toFixed(2));
     const close = marketData.open ? parseFloat(marketData.open) : price;
 
     return await this.updateDailyPivots(high, low, close);
@@ -99,13 +101,34 @@ class PivotService extends EventEmitter {
     const range = parseFloat((h - l).toFixed(2));
     const pivot = parseFloat(((h + l + c) / 3).toFixed(2));
 
-    // Fibonacci pivot formula (TradingView Standard Formula)
-    const r3 = parseFloat((pivot + 1.000 * range).toFixed(2));
-    const r2 = parseFloat((pivot + 0.618 * range).toFixed(2));
-    const r1 = parseFloat((pivot + 0.382 * range).toFixed(2));
-    const s1 = parseFloat((pivot - 0.382 * range).toFixed(2));
-    const s2 = parseFloat((pivot - 0.618 * range).toFixed(2));
-    const s3 = parseFloat((pivot - 1.000 * range).toFixed(2));
+    let r3, r2, r1, s1, s2, s3;
+    const pType = (this.config.pivotType || 'FIBONACCI').toUpperCase();
+
+    if (pType === 'TRADITIONAL' || pType === 'CLASSIC') {
+      // Traditional Floor Pivots
+      r1 = parseFloat((2 * pivot - l).toFixed(2));
+      s1 = parseFloat((2 * pivot - h).toFixed(2));
+      r2 = parseFloat((pivot + range).toFixed(2));
+      s2 = parseFloat((pivot - range).toFixed(2));
+      r3 = parseFloat((h + 2 * (pivot - l)).toFixed(2));
+      s3 = parseFloat((l - 2 * (h - pivot)).toFixed(2));
+    } else if (pType === 'CAMARILLA') {
+      // Camarilla Pivots
+      r3 = parseFloat((c + range * 1.1 / 4).toFixed(2));
+      r2 = parseFloat((c + range * 1.1 / 6).toFixed(2));
+      r1 = parseFloat((c + range * 1.1 / 12).toFixed(2));
+      s1 = parseFloat((c - range * 1.1 / 12).toFixed(2));
+      s2 = parseFloat((c - range * 1.1 / 6).toFixed(2));
+      s3 = parseFloat((c - range * 1.1 / 4).toFixed(2));
+    } else {
+      // Standard Fibonacci Pivots (TradingView Standard Default)
+      r3 = parseFloat((pivot + 1.000 * range).toFixed(2));
+      r2 = parseFloat((pivot + 0.618 * range).toFixed(2));
+      r1 = parseFloat((pivot + 0.382 * range).toFixed(2));
+      s1 = parseFloat((pivot - 0.382 * range).toFixed(2));
+      s2 = parseFloat((pivot - 0.618 * range).toFixed(2));
+      s3 = parseFloat((pivot - 1.000 * range).toFixed(2));
+    }
 
     // If levels already match, don't re-save or re-broadcast
     if (
@@ -137,7 +160,7 @@ class PivotService extends EventEmitter {
       logger.warn(`Could not save config to DB: ${saveErr.message}`);
     }
 
-    logger.info(`✨ Synchronized live Fibonacci levels: R3: \$${r3}, R2: \$${r2}, S2: \$${s2}, S3: \$${s3} (Session High: \$${h}, Low: \$${l}, Close/Price: \$${c})`);
+    logger.info(`✨ Synchronized live ${pType} levels: R3: \$${r3}, R2: \$${r2}, S2: \$${s2}, S3: \$${s3} (Session High: \$${h}, Low: \$${l}, Close/Price: \$${c})`);
 
     this.broadcastConfigUpdate();
     return this.config;
@@ -147,7 +170,7 @@ class PivotService extends EventEmitter {
     if (!this.config) await this.initialize();
     
     const numericFields = ['r3', 'r2', 'r1', 'pivot', 's1', 's2', 's3', 'tolerance', 'retriggerDistance', 'barSpacing'];
-    const stringFields = ['symbol', 'tradingViewTicker', 'customChartUrl', 'chartTimeframe', 'chartRange'];
+    const stringFields = ['symbol', 'tradingViewTicker', 'customChartUrl', 'chartTimeframe', 'chartRange', 'pivotType'];
     const booleanFields = ['enabled', 'autoCalculatePivot', 'telegramAlertsEnabled'];
 
     numericFields.forEach(k => {
