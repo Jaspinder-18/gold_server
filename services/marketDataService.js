@@ -13,22 +13,22 @@ class MarketDataService extends EventEmitter {
     this.provider = process.env.MARKET_DATA_PROVIDER || 'tradingview';
     this.pollingInterval = parseInt(process.env.POLLING_INTERVAL_MS || '2000', 10);
 
-    this.basePrice = 4345.50;
+    this.basePrice = null;
     this.currentData = {
       symbol: 'XAU/USD',
       rawSymbol: 'XAUUSD',
       provider: 'TradingView Real-Time (OANDA / Spot Stream)',
-      price: 4345.50,
-      previousPrice: 4345.50,
-      bid: 4345.25,
-      ask: 4345.75,
-      high24h: 4386.20,
-      low24h: 4328.10,
-      open: 4376.20,
-      change: -30.70,
-      changePercent: -0.70,
-      volume: 285400,
-      marketStatus: 'LIVE',
+      price: null,
+      previousPrice: null,
+      bid: null,
+      ask: null,
+      high24h: null,
+      low24h: null,
+      open: null,
+      change: null,
+      changePercent: null,
+      volume: null,
+      marketStatus: 'CONNECTING...',
       connected: false,
       lastUpdated: new Date()
     };
@@ -44,16 +44,16 @@ class MarketDataService extends EventEmitter {
   async initialize() {
     logger.market(`Initializing Market Data Feed for ${this.symbol} via ${this.provider}...`);
     
-    // 1. Fetch historical 5m klines
+    // 1. Fetch historical klines
     await this.fetchHistoricalKlines();
 
-    // 2. Fetch initial TradingView quote
+    // 2. Fetch initial real market quote
     await this.fetchTradingViewQuote();
 
     // 3. Connect real-time high-speed WebSocket stream
     this.initWebSocketStream();
 
-    // 4. Start continuous micro-tick pulse (fires both UP and DOWN ticks every 200ms)
+    // 4. Start continuous micro-tick pulse (only runs when basePrice is verified)
     this.startMicroTickPulse();
 
     // 5. Polling fallback for baseline sync
@@ -62,23 +62,25 @@ class MarketDataService extends EventEmitter {
     // 6. Periodic snapshot persistence in DB (every 60s)
     this.snapshotTimer = setInterval(() => this.saveSnapshot(), 60000);
 
-    logger.market(`Market Data Service initialized. Live Price: $${this.currentData.price.toFixed(2)}`);
+    logger.market(`Market Data Service initialized. Live Price: $${this.currentData.price || 'FETCHING'}`);
   }
 
-  // Continuous micro-tick stream engine (50% UP/Red, 50% DOWN/Green every 200ms)
+  // Continuous micro-tick stream engine (only active when live verified basePrice exists)
   startMicroTickPulse() {
     if (this.microTickTimer) clearInterval(this.microTickTimer);
     
     this.microTickTimer = setInterval(() => {
+      if (!this.basePrice || !this.currentData.connected || !this.currentData.price) return;
+
       const isUp = Math.random() >= 0.5;
       const step = 0.02 + Math.random() * 0.12; // $0.02 to $0.14 tick step
       const delta = isUp ? step : -step;
       const prev = this.currentData.price;
       const newPrice = parseFloat((this.currentData.price + delta).toFixed(2));
 
-      // Stay pinned within tight band of real market base price
-      if (Math.abs(newPrice - this.basePrice) > 1.8) {
-        this.currentData.price = parseFloat((this.basePrice + (isUp ? -0.20 : 0.20)).toFixed(2));
+      // Stay pinned within tight 80-cent micro band of real market base price
+      if (Math.abs(newPrice - this.basePrice) > 0.80) {
+        this.currentData.price = parseFloat((this.basePrice + (isUp ? -0.10 : 0.10)).toFixed(2));
       } else {
         this.currentData.price = newPrice;
       }
@@ -87,18 +89,19 @@ class MarketDataService extends EventEmitter {
       this.currentData.bid = parseFloat((this.currentData.price - 0.25).toFixed(2));
       this.currentData.ask = parseFloat((this.currentData.price + 0.25).toFixed(2));
       this.currentData.lastUpdated = new Date();
-      this.currentData.connected = true;
 
       // Update 24h change
-      this.currentData.change = parseFloat((this.currentData.price - this.currentData.open).toFixed(2));
-      this.currentData.changePercent = parseFloat(((this.currentData.change / this.currentData.open) * 100).toFixed(2));
+      if (this.currentData.open) {
+        this.currentData.change = parseFloat((this.currentData.price - this.currentData.open).toFixed(2));
+        this.currentData.changePercent = parseFloat(((this.currentData.change / this.currentData.open) * 100).toFixed(2));
+      }
 
       this.updateLiveCandle(this.currentData.price);
       this.emit('tick', { ...this.currentData, tickType: isUp ? 'UP' : 'DOWN' });
-    }, 200);
+    }, 250);
   }
 
-  // Primary TradingView Scanner API fetch
+  // Primary TradingView Scanner API fetch + Yahoo Finance fallback
   async fetchTradingViewQuote() {
     try {
       const response = await axios.post(
@@ -128,7 +131,7 @@ class MarketDataService extends EventEmitter {
         },
         {
           headers: { 'Content-Type': 'application/json' },
-          timeout: 4000
+          timeout: 4500
         }
       );
 
@@ -148,6 +151,7 @@ class MarketDataService extends EventEmitter {
           if (change_abs) this.currentData.change = parseFloat(change_abs);
           if (change) this.currentData.changePercent = parseFloat(change);
           if (volume) this.currentData.volume = parseInt(volume, 10);
+          this.currentData.marketStatus = 'LIVE';
           this.currentData.connected = true;
           this.currentData.lastUpdated = new Date();
           
@@ -158,8 +162,39 @@ class MarketDataService extends EventEmitter {
         }
       }
     } catch (err) {
-      // Fallback
+      logger.warn(`TradingView scanner query error: ${err.message}. Fetching Yahoo Finance Gold stream...`);
     }
+
+    // High-reliability fallback: Yahoo Finance Gold Spot / Futures Stream
+    try {
+      const yRes = await axios.get('https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=1m&range=1d', { timeout: 4500 });
+      const meta = yRes.data?.chart?.result?.[0]?.meta;
+      if (meta && meta.regularMarketPrice && meta.regularMarketPrice > 1000) {
+        const newPrice = parseFloat(meta.regularMarketPrice.toFixed(2));
+        this.basePrice = newPrice;
+        this.currentData.price = newPrice;
+        this.currentData.bid = parseFloat((newPrice - 0.25).toFixed(2));
+        this.currentData.ask = parseFloat((newPrice + 0.25).toFixed(2));
+        if (meta.regularMarketDayHigh) this.currentData.high24h = parseFloat(meta.regularMarketDayHigh.toFixed(2));
+        if (meta.regularMarketDayLow) this.currentData.low24h = parseFloat(meta.regularMarketDayLow.toFixed(2));
+        if (meta.previousClose) {
+          this.currentData.open = parseFloat(meta.previousClose.toFixed(2));
+          this.currentData.change = parseFloat((newPrice - meta.previousClose).toFixed(2));
+          this.currentData.changePercent = parseFloat(((this.currentData.change / meta.previousClose) * 100).toFixed(2));
+        }
+        this.currentData.marketStatus = 'LIVE';
+        this.currentData.connected = true;
+        this.currentData.lastUpdated = new Date();
+
+        this.updateLiveCandle(newPrice);
+        this.emit('tick', { ...this.currentData });
+        this.checkAutoRecalculate();
+        return this.currentData;
+      }
+    } catch (yErr) {
+      logger.warn(`Yahoo Gold stream error: ${yErr.message}`);
+    }
+
     return this.currentData;
   }
 
