@@ -34,7 +34,17 @@ const AlertConfigurationSchema = new mongoose.Schema({
   },
   autoCalculatePivot: {
     type: Boolean,
-    default: false
+    default: true
+  },
+  pivotType: {
+    type: String,
+    enum: ['TRADITIONAL', 'FIBONACCI', 'CAMARILLA', 'WOODIE', 'CLASSIC'],
+    default: 'TRADITIONAL'
+  },
+  pivotTimeframe: {
+    type: String,
+    enum: ['DAILY', 'WEEKLY', 'MONTHLY'],
+    default: 'DAILY'
   },
   // Floor / Fibonacci Pivot Point values
   r3: {

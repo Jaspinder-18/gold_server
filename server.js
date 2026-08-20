@@ -24,6 +24,8 @@ import marketRoutes from './routes/marketRoutes.js';
 import alertRoutes from './routes/alertRoutes.js';
 import configRoutes from './routes/configRoutes.js';
 import testRoutes from './routes/testRoutes.js';
+import symbolRoutes from './routes/symbolRoutes.js';
+import { symbolService } from './services/symbolService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -66,57 +68,71 @@ app.use('/api/market', marketRoutes);
 app.use('/api/alerts', alertRoutes);
 app.use('/api/config', configRoutes);
 app.use('/api/test', testRoutes);
+app.use('/api/symbols', symbolRoutes);
 
-// Lightweight Health Check endpoint (no DB queries or heavy processing)
+// Lightweight Health Check endpoint
 app.get('/api/health', (req, res) => {
   res.status(200).json({ status: 'ok' });
 });
 
 // Root route & Service status
-app.get('/api', (req, res) => {
+app.get('/', (req, res) => {
   res.json({
-    service: 'Gold (XAU/USD) TradingView Market Alert Engine',
-    version: '1.0.0',
-    status: 'ONLINE',
-    screenshotEngine: screenshotService.getStatus(),
-    timestamp: new Date()
+    name: 'Multi-Asset Trading Alert Terminal Engine',
+    status: 'ACTIVE',
+    version: '2.0.0',
+    activeSymbol: symbolService.getActiveSymbol(),
+    market: marketDataService.getMarketData(),
+    pivot: pivotService.getActivePivotState(),
+    uptime: process.uptime()
   });
 });
 
 // Socket.IO Connection Handler
 io.on('connection', (socket) => {
-  logger.info(`Dashboard Client connected [Socket ID: ${socket.id}]`);
+  logger.info(`Client connected: ${socket.id}`);
 
-  // Send immediate initial state
-  const market = marketDataService.getMarketData();
-  const config = pivotService.getConfig();
-  const distances = pivotService.getDistances(market.price);
-  const states = alertService.getAlertStates();
-  const screenshotStatus = screenshotService.getStatus();
+  // Send current state immediately upon connection
+  const activeSym = symbolService.getActiveSymbol();
+  socket.emit('initial:state', {
+    activeSymbol: activeSym,
+    symbolConfig: symbolService.getActiveSymbolConfig(),
+    market: marketDataService.getMarketData(),
+    config: pivotService.getConfig(activeSym),
+    pivotState: pivotService.getActivePivotState(),
+    distances: marketDataService.getMarketData().distances,
+    alertStates: alertService.getAllLevelStates(activeSym)
+  });
 
-  socket.emit('initial_state', {
-    market,
-    config,
-    distances,
-    alertStates: states,
-    screenshotStatus
+  // Client requests to switch active symbol
+  socket.on('symbol:change', async (newSymbol) => {
+    try {
+      const symConfig = await symbolService.setActiveSymbol(newSymbol);
+      const pivotState = await pivotService.getOrCalculatePivotsForSymbol(symConfig.symbol);
+      io.emit('symbol:active', {
+        symbol: symConfig.symbol,
+        config: symConfig,
+        pivotState,
+        market: marketDataService.getMarketData(),
+        alertStates: alertService.getAllLevelStates(symConfig.symbol)
+      });
+    } catch (err) {
+      socket.emit('error', { message: err.message });
+    }
   });
 
   socket.on('disconnect', () => {
-    // Client disconnected
+    logger.info(`Client disconnected: ${socket.id}`);
   });
 });
 
-// Relay Market Ticks to Socket.IO Clients
+// Relay Real-Time Market Ticks to Connected Clients
 marketDataService.on('tick', (data) => {
-  const distances = pivotService.getDistances(data.price);
-  io.emit('market_tick', {
-    ...data,
-    distances
-  });
+  io.emit('market:tick', data);
+  io.emit('market_tick', data);
 });
 
-// Error handling middleware
+// Error Handling Middleware
 app.use((err, req, res, next) => {
   logger.error(`Unhandled Error: ${err.message}`, err.stack);
   res.status(500).json({ success: false, error: 'Internal Server Error', details: err.message });
@@ -130,20 +146,23 @@ const startServer = async () => {
     // 1. Connect MongoDB
     await connectDB();
 
-    // 2. Initialize Pivot Calculation Engine
+    // 2. Initialize Symbol Catalog
+    await symbolService.initialize();
+
+    // 3. Initialize Pivot Calculation Engine
     await pivotService.initialize(io);
 
-    // 3. Initialize Alert Service
+    // 4. Initialize Alert Service
     await alertService.initialize(io);
 
-    // 4. Initialize Isolated Playwright TradingView Screenshot Worker
+    // 5. Initialize Isolated Playwright TradingView Screenshot Worker
     try {
       await screenshotService.initialize();
     } catch (screenErr) {
       logger.warn(`Screenshot service init deferred: ${screenErr.message}`);
     }
 
-    // 5. Initialize Market Data Live Feed
+    // 6. Initialize Market Data Live Feed
     await marketDataService.initialize();
 
     // 6. Immediately calculate and activate fresh live Fibonacci levels from current live market

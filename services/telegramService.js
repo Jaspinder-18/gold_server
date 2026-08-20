@@ -20,12 +20,16 @@ class TelegramService {
 
   formatAlertMessage(alertData) {
     const {
-      symbol = 'XAU/USD',
+      symbol = 'XAUUSD',
+      tradingViewTicker,
       level = 'R2',
-      levelPrice = 4442.28,
-      currentPrice = 4442.30,
+      levelPrice = 0,
+      currentPrice = 0,
+      pivot = 0,
       tolerance = 0.20,
       previousPrice,
+      timeframe = '15m',
+      pivotPeriod = 'Daily',
       timestamp = new Date(),
       isTest = false
     } = alertData;
@@ -36,27 +40,23 @@ class TelegramService {
 
     const isResistance = level.startsWith('R');
     const actionEmoji = isResistance ? '📈' : '📉';
-    const levelType = isResistance ? 'resistance' : 'support';
-    const alertHeader = isTest ? '🧪 [TEST] GOLD MARKET ALERT' : '🚨 GOLD MARKET ALERT';
+    const levelType = isResistance ? 'Resistance' : 'Support';
+    const alertHeader = isTest ? `🧪 [TEST] ${symbol} MARKET ALERT` : `🚨 ${symbol} MARKET ALERT`;
 
     return `${alertHeader}
 
-📊 <b>${symbol}</b>
+📊 <b>SYMBOL:</b> <code>${symbol}</code> ${tradingViewTicker ? `(${tradingViewTicker})` : ''}
+🎯 <b>LEVEL:</b> <code>${level} (${levelType})</code>
+💰 <b>PRICE:</b> <code>${Number(currentPrice).toFixed(2)}</code>
+📌 <b>${level} TARGET:</b> <code>${Number(levelPrice).toFixed(2)}</code>
+${pivot ? `⚖️ <b>PIVOT (P):</b> <code>${Number(pivot).toFixed(2)}</code>\n` : ''}📐 <b>TOLERANCE:</b> <code>±${Number(tolerance).toFixed(2)}</code>
+⏱ <b>TIMEFRAME:</b> <code>${timeframe}</code>
+📅 <b>PIVOT PERIOD:</b> <code>${pivotPeriod}</code>
+${previousPrice ? `🔄 <b>PREV PRICE:</b> <code>${Number(previousPrice).toFixed(2)}</code>\n` : ''}
+${actionEmoji} <b>ACTION:</b> Price touched <b>${level}</b> level on live chart.
+🕐 <b>TIME:</b> ${dateFormatted} | ${timeFormatted} UTC
 
-🎯 <b>Level Touched:</b> <code>${level}</code>
-💰 <b>Current Price:</b> <code>$${Number(currentPrice).toFixed(2)}</code>
-📌 <b>${level} Level:</b> <code>$${Number(levelPrice).toFixed(2)}</code>
-📐 <b>Tolerance:</b> <code>±$${Number(tolerance).toFixed(2)}</code>
-${previousPrice ? `🔄 <b>Prev Price:</b> <code>$${Number(previousPrice).toFixed(2)}</code>\n` : ''}
-${actionEmoji} <b>Market Action:</b>
-Price has touched the <b>${level} ${levelType}</b> level.
-
-🕐 <b>Time:</b>
-${dateFormatted} | ${timeFormatted} UTC
-
-📸 <i>Live TradingView chart screenshot attached.</i>
-
-⚠️ <i>This is an automated market-level alert, not financial advice.</i>`;
+📸 <i>TradingView chart capture attached.</i>`;
   }
 
   async sendAlertNotification(alertData, screenshotBufferOrPath) {

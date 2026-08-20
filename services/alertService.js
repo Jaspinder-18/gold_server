@@ -4,6 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { logger } from '../utils/logger.js';
 import { MarketEvent } from '../models/MarketEvent.js';
+import { symbolService } from './symbolService.js';
 import { pivotService } from './pivotService.js';
 import { screenshotService } from './screenshotService.js';
 import { telegramService } from './telegramService.js';
@@ -18,90 +19,146 @@ class AlertService extends EventEmitter {
     super();
     this.io = null;
 
-    // Track active trigger status & debounce per level
-    this.levelStates = {
-      R3: { status: 'READY', lastTriggerPrice: null, lastTriggerTime: null },
-      R2: { status: 'READY', lastTriggerPrice: null, lastTriggerTime: null },
-      S2: { status: 'READY', lastTriggerPrice: null, lastTriggerTime: null },
-      S3: { status: 'READY', lastTriggerPrice: null, lastTriggerTime: null }
-    };
-
+    // Per-symbol level trigger states: symbol -> { R3: { status, lastTriggerPrice, lastTriggerTime }, ... }
+    this.symbolLevelStates = new Map();
     this.isProcessingAlert = false;
   }
 
   async initialize(socketServer) {
-    logger.alert('Initializing Level Touch Alert Engine (Monitoring R3, R2, S2, S3)...');
+    logger.alert('Initializing Multi-Symbol Level Touch Alert Engine...');
     this.io = socketServer;
 
-    // Listen to continuous high-frequency market tick stream
+    // Listen to market ticks
     marketDataService.on('tick', (data) => {
       this.evaluateMarketPrice(data);
     });
 
-    // Run initial DB & disk prune to keep strictly latest 6 records
+    // Run initial cleanup to keep max 6 latest records
     await this.enforceMaxHistory(6);
 
-    logger.alert('Level Touch Alert Engine running.');
+    logger.alert('Level Touch Alert Engine ready.');
+  }
+
+  getLevelState(symbolStr, levelName) {
+    const sym = (symbolStr || symbolService.getActiveSymbol()).toUpperCase();
+    if (!this.symbolLevelStates.has(sym)) {
+      this.symbolLevelStates.set(sym, {
+        R3: { status: 'READY', lastTriggerPrice: null, lastTriggerTime: null },
+        R2: { status: 'READY', lastTriggerPrice: null, lastTriggerTime: null },
+        R1: { status: 'READY', lastTriggerPrice: null, lastTriggerTime: null },
+        PIVOT: { status: 'READY', lastTriggerPrice: null, lastTriggerTime: null },
+        S1: { status: 'READY', lastTriggerPrice: null, lastTriggerTime: null },
+        S2: { status: 'READY', lastTriggerPrice: null, lastTriggerTime: null },
+        S3: { status: 'READY', lastTriggerPrice: null, lastTriggerTime: null }
+      });
+    }
+    return this.symbolLevelStates.get(sym)[levelName];
+  }
+
+  getAllLevelStates(symbolStr) {
+    const sym = (symbolStr || symbolService.getActiveSymbol()).toUpperCase();
+    if (!this.symbolLevelStates.has(sym)) {
+      this.getLevelState(sym, 'R3'); // Initializer
+    }
+    const stateObj = this.symbolLevelStates.get(sym);
+    const result = {};
+    for (const [k, v] of Object.entries(stateObj)) {
+      result[k] = v.status;
+    }
+    return result;
+  }
+
+  resetLevelState(symbolStr, levelName) {
+    const state = this.getLevelState(symbolStr, levelName);
+    if (state) {
+      state.status = 'READY';
+      state.lastTriggerPrice = null;
+      state.lastTriggerTime = null;
+      logger.info(`Level ${levelName} for ${symbolStr} manually reset to READY.`);
+      if (this.io) {
+        this.io.emit('alert:states', this.getAllLevelStates(symbolStr));
+      }
+    }
   }
 
   /**
-   * Core Level-Touch Evaluation Function
+   * Core Level-Touch Evaluation Function with Tick Crossing & Range Detection
    */
   evaluateMarketPrice(marketData) {
     if (this.isProcessingAlert) return;
 
-    const config = pivotService.getConfig();
+    const sym = (marketData.rawSymbol || symbolService.getActiveSymbol()).toUpperCase();
+    const config = pivotService.getConfig(sym);
     if (!config || !config.enabled) return;
 
-    const currentPrice = parseFloat(marketData.price);
-    const tolerance = parseFloat(config.tolerance || '0.20');
-    const retriggerDistance = parseFloat(config.retriggerDistance || '1.00');
+    const pivot = pivotService.getActivePivotState();
+    if (!pivot || !pivot.isValid) return;
 
-    // Strictly evaluate only the 4 levels: R3, R2, S2, S3
+    const currentPrice = parseFloat(marketData.price);
+    const prevPrice = marketData.previousPrice !== null ? parseFloat(marketData.previousPrice) : currentPrice;
+    const tolerance = parseFloat(config.tolerance || 0.20);
+    const retriggerDistance = parseFloat(config.retriggerDistance || 1.00);
+
     const levelsToEvaluate = [
-      { name: 'R3', target: config.r3, direction: 'TOUCH_RESISTANCE' },
-      { name: 'R2', target: config.r2, direction: 'TOUCH_RESISTANCE' },
-      { name: 'S2', target: config.s2, direction: 'TOUCH_SUPPORT' },
-      { name: 'S3', target: config.s3, direction: 'TOUCH_SUPPORT' }
+      { name: 'R3', target: pivot.r3, direction: 'TOUCH_RESISTANCE' },
+      { name: 'R2', target: pivot.r2, direction: 'TOUCH_RESISTANCE' },
+      { name: 'S2', target: pivot.s2, direction: 'TOUCH_SUPPORT' },
+      { name: 'S3', target: pivot.s3, direction: 'TOUCH_SUPPORT' }
     ];
 
     for (const lvl of levelsToEvaluate) {
       if (lvl.target === undefined || lvl.target === null || isNaN(lvl.target)) continue;
 
-      const state = this.levelStates[lvl.name] || { status: 'READY', lastTriggerPrice: null };
+      const state = this.getLevelState(sym, lvl.name);
+      if (!state) continue;
+
       const diff = Math.abs(currentPrice - lvl.target);
+      
+      // 1. Range Touch Check: within tolerance band
       const isTouching = diff <= tolerance;
 
-      // Check for re-trigger reset hysteresis
+      // 2. Tick Crossing Check: price crossed over the level
+      const crossedUp = prevPrice < lvl.target && currentPrice >= lvl.target;
+      const crossedDown = prevPrice > lvl.target && currentPrice <= lvl.target;
+      const isCrossing = crossedUp || crossedDown;
+
+      // Hysteresis & Debounce state transition check
       if (state.status === 'TRIGGERED' || state.status === 'PREVIOUSLY_TOUCHED') {
-        const distanceFromLastTrigger = Math.abs(currentPrice - (state.lastTriggerPrice || lvl.target));
+        const distanceFromLast = Math.abs(currentPrice - (state.lastTriggerPrice || lvl.target));
         
-        if (state.status === 'TRIGGERED' && distanceFromLastTrigger >= retriggerDistance) {
+        if (state.status === 'TRIGGERED' && distanceFromLast >= retriggerDistance) {
           state.status = 'PREVIOUSLY_TOUCHED';
-          logger.info(`Level ${lvl.name} transitioned to PREVIOUSLY_TOUCHED (blue) state. Price moved away by $${distanceFromLastTrigger.toFixed(2)} (>= threshold $${retriggerDistance.toFixed(2)})`);
+          logger.info(`Level ${lvl.name} (${sym}) transitioned to PREVIOUSLY_TOUCHED. Distance moved: ${distanceFromLast.toFixed(2)} (>= threshold ${retriggerDistance.toFixed(2)})`);
+          if (this.io) this.io.emit('alert:states', this.getAllLevelStates(sym));
         }
-        
-        if (state.status === 'PREVIOUSLY_TOUCHED' && distanceFromLastTrigger >= (retriggerDistance * 2.0)) {
+
+        if (state.status === 'PREVIOUSLY_TOUCHED' && distanceFromLast >= (retriggerDistance * 2.0)) {
           state.status = 'READY';
-          logger.info(`Level ${lvl.name} fully reset to READY (yellow) state. Ready for fresh touch alerts.`);
+          logger.info(`Level ${lvl.name} (${sym}) fully reset to READY. Ready for fresh alerts.`);
+          if (this.io) this.io.emit('alert:states', this.getAllLevelStates(sym));
         }
       }
 
-      // Trigger condition
-      if (isTouching && state.status === 'READY') {
-        const reason = `Gold XAU/USD touched ${lvl.name} @ $${currentPrice.toFixed(2)} (Target: $${lvl.target.toFixed(2)}, Tolerance: ±$${tolerance.toFixed(2)})`;
-        
+      // Trigger condition: Touching or Crossing while in READY state
+      if ((isTouching || isCrossing) && state.status === 'READY') {
+        const reason = `${sym} touched ${lvl.name} @ $${currentPrice.toFixed(2)} (Target: $${lvl.target.toFixed(2)}, Tolerance: ±$${tolerance.toFixed(2)})`;
+
         this.triggerAlertPipeline({
-          symbol: 'XAUUSD',
+          symbol: sym,
+          displayName: marketData.displayName || sym,
           level: lvl.name,
           levelPrice: lvl.target,
           currentPrice,
-          previousPrice: marketData.previousPrice || currentPrice,
-          direction: lvl.direction,
+          previousPrice: prevPrice,
+          direction: crossedUp ? 'CROSS_UP' : (crossedDown ? 'CROSS_DOWN' : lvl.direction),
           tolerance,
           triggerReason: reason,
-          isTest: false
+          isTest: false,
+          pivotPeriod: pivot.periodDateStr || 'DAILY',
+          pivotType: pivot.pivotType,
+          pivotTimeframe: pivot.pivotTimeframe
         });
+        break;
       }
     }
   }
@@ -113,26 +170,26 @@ class AlertService extends EventEmitter {
     this.isProcessingAlert = true;
 
     try {
-      logger.alert(`>>> TRIGGERING ALERT: ${alertParams.level} @ $${alertParams.currentPrice} (${alertParams.isTest ? 'TEST MODE' : 'LIVE MARKET'}) <<<`);
+      const sym = (alertParams.symbol || symbolService.getActiveSymbol()).toUpperCase();
+      logger.alert(`>>> TRIGGERING ALERT: ${sym} ${alertParams.level} @ $${alertParams.currentPrice} (${alertParams.isTest ? 'TEST MODE' : 'LIVE MARKET'}) <<<`);
 
-      // Update level state lock
-      if (this.levelStates[alertParams.level]) {
-        this.levelStates[alertParams.level] = {
-          status: 'TRIGGERED',
-          lastTriggerPrice: alertParams.currentPrice,
-          lastTriggerTime: new Date()
-        };
+      // Lock state to TRIGGERED
+      const state = this.getLevelState(sym, alertParams.level);
+      if (state) {
+        state.status = 'TRIGGERED';
+        state.lastTriggerPrice = alertParams.currentPrice;
+        state.lastTriggerTime = new Date();
       }
 
-      const config = pivotService.getConfig();
-      const klines = marketDataService.getKlines();
+      const config = pivotService.getConfig(sym);
+      const symConfig = symbolService.getSymbol(sym) || symbolService.getActiveSymbolConfig();
 
-      // 1. Generate Real TradingView Chart Screenshot
+      // 1. Generate Real TradingView Screenshot for active symbol
       let screenshotData = { filename: '', fullPath: '', relativePath: '', buffer: null };
       try {
         screenshotData = await screenshotService.generateChartScreenshot({
           ...alertParams,
-          klines,
+          symbol: symConfig.tradingViewTicker || `OANDA:${sym}`,
           pivotConfig: config,
           timestamp: new Date()
         });
@@ -140,118 +197,118 @@ class AlertService extends EventEmitter {
         logger.error(`Screenshot generation error in alert pipeline: ${screenErr.message}`);
       }
 
-      // 2. Dispatch Telegram Alert with Photo & Message
-      let telegramResult = { success: false, message: '' };
+      // 2. Dispatch Telegram Notification with screenshot
+      let telegramResult = { success: false, messageId: null, error: null };
       if (config.telegramAlertsEnabled !== false) {
-        telegramResult = await telegramService.sendAlertNotification(
-          alertParams,
-          screenshotData.buffer || screenshotData.fullPath
-        );
+        try {
+          telegramResult = await telegramService.sendAlertNotification(
+            {
+              ...alertParams,
+              symbol: symConfig.displayName || sym,
+              tradingViewTicker: symConfig.tradingViewTicker,
+              pivot: config.pivot,
+              timeframe: config.chartTimeframe
+            },
+            screenshotData.fullPath || screenshotData.buffer
+          );
+        } catch (tgErr) {
+          logger.error(`Telegram delivery error in alert pipeline: ${tgErr.message}`);
+          telegramResult.error = tgErr.message;
+        }
       } else {
-        telegramResult = { success: true, message: 'Telegram alerts disabled in configuration.' };
+        telegramResult = { success: true, messageId: 'DISABLED', message: 'Telegram alerts disabled in settings' };
       }
 
       // 3. Persist Event in MongoDB
-      const marketEvent = await MarketEvent.create({
-        symbol: alertParams.symbol || 'XAUUSD',
-        currentPrice: alertParams.currentPrice,
-        level: alertParams.level,
-        levelPrice: alertParams.levelPrice,
-        direction: alertParams.direction || 'TOUCH_HIGH',
-        tolerance: alertParams.tolerance || config.tolerance,
-        previousPrice: alertParams.previousPrice,
-        triggerReason: alertParams.triggerReason,
-        screenshotPath: screenshotData.relativePath || null,
-        telegramStatus: telegramResult.success ? 'SENT' : 'FAILED',
-        telegramMessage: telegramResult.message,
-        telegramMessageId: telegramResult.messageId ? String(telegramResult.messageId) : undefined,
-        telegramError: telegramResult.error,
-        isTest: alertParams.isTest || false,
-        timestamp: new Date()
-      });
+      let eventDoc = null;
+      try {
+        eventDoc = await MarketEvent.create({
+          symbol: sym,
+          assetType: symConfig.assetType,
+          exchange: symConfig.exchange,
+          currentPrice: alertParams.currentPrice,
+          previousPrice: alertParams.previousPrice,
+          level: alertParams.level,
+          levelPrice: alertParams.levelPrice,
+          direction: alertParams.direction,
+          tolerance: alertParams.tolerance,
+          triggerReason: alertParams.triggerReason,
+          screenshotPath: screenshotData.relativePath || '',
+          telegramStatus: telegramResult.success ? 'SENT' : 'FAILED',
+          telegramMessage: telegramResult.message,
+          telegramMessageId: telegramResult.messageId,
+          telegramError: telegramResult.error,
+          isTest: !!alertParams.isTest,
+          pivotType: alertParams.pivotType || config.pivotType,
+          pivotTimeframe: alertParams.pivotTimeframe || config.pivotTimeframe,
+          pivotPeriod: alertParams.pivotPeriod || 'DAILY',
+          timestamp: new Date()
+        });
+      } catch (dbErr) {
+        logger.error(`Failed to save MarketEvent to database: ${dbErr.message}`);
+        eventDoc = {
+          _id: `temp-${Date.now()}`,
+          symbol: sym,
+          currentPrice: alertParams.currentPrice,
+          level: alertParams.level,
+          levelPrice: alertParams.levelPrice,
+          direction: alertParams.direction,
+          triggerReason: alertParams.triggerReason,
+          screenshotPath: screenshotData.relativePath || '',
+          telegramStatus: telegramResult.success ? 'SENT' : 'FAILED',
+          isTest: !!alertParams.isTest,
+          timestamp: new Date()
+        };
+      }
 
-      logger.alert(`Market Event persisted in DB with ID: ${marketEvent._id}`);
-
-      // 4. Auto-prune database & disk to strictly keep the latest 6
+      // 4. Enforce strict max 6 records retention
       await this.enforceMaxHistory(6);
 
-      // 5. Emit event in real-time to Dashboard via Socket.IO
+      // 5. Broadcast to Connected Web & Mobile Socket.IO Clients
       if (this.io) {
-        this.io.emit('alert_triggered', {
-          event: marketEvent,
-          alertStates: this.levelStates,
-          distances: pivotService.getDistances(alertParams.currentPrice)
+        this.io.emit('alert:triggered', {
+          event: eventDoc,
+          alertStates: this.getAllLevelStates(sym),
+          distances: marketDataService.getMarketData().distances
         });
       }
 
-      this.emit('alert', marketEvent);
-      return marketEvent;
-    } catch (err) {
-      logger.error('Error in Alert Execution Pipeline', err);
-      throw err;
+      this.emit('alertProcessed', eventDoc);
+      return eventDoc;
     } finally {
       this.isProcessingAlert = false;
     }
   }
 
-  /**
-   * Automatic cleanup of database and disk records (strictly keeps maxCount = 6)
-   */
-  async enforceMaxHistory(maxCount = 6) {
+  async enforceMaxHistory(limit = 6) {
     try {
-      const allEvents = await MarketEvent.find().sort({ createdAt: -1 });
-      if (allEvents.length > maxCount) {
-        const toDelete = allEvents.slice(maxCount);
-        for (const evt of toDelete) {
-          if (evt.screenshotPath) {
-            const filename = path.basename(evt.screenshotPath);
-            const fullPath = path.join(SCREENSHOTS_DIR, filename);
-            if (fs.existsSync(fullPath)) {
-              try { fs.unlinkSync(fullPath); } catch (e) {}
+      const allEvents = await MarketEvent.find().sort({ timestamp: -1 });
+      if (allEvents.length > limit) {
+        const eventsToDelete = allEvents.slice(limit);
+        const idsToDelete = eventsToDelete.map(e => e._id);
+        await MarketEvent.deleteMany({ _id: { $in: idsToDelete } });
+
+        // Clean up orphaned screenshots from disk
+        const currentScreenshots = new Set(
+          allEvents.slice(0, limit)
+            .map(e => path.basename(e.screenshotPath || ''))
+            .filter(Boolean)
+        );
+
+        if (fs.existsSync(SCREENSHOTS_DIR)) {
+          const diskFiles = fs.readdirSync(SCREENSHOTS_DIR);
+          for (const file of diskFiles) {
+            if (file !== '.gitkeep' && !currentScreenshots.has(file)) {
+              try {
+                fs.unlinkSync(path.join(SCREENSHOTS_DIR, file));
+              } catch (e) {}
             }
           }
-          await MarketEvent.findByIdAndDelete(evt._id);
         }
-        logger.info(`🧹 DB Auto-Prune: Removed ${toDelete.length} old alerts and screenshots (kept strictly latest ${maxCount}).`);
       }
-    } catch (e) {
-      logger.warn(`Error in enforceMaxHistory: ${e.message}`);
+    } catch (err) {
+      logger.warn(`Could not enforce alert history limit: ${err.message}`);
     }
-  }
-
-  /**
-   * Test Mode Pipeline Trigger
-   */
-  async triggerTestAlert(level = 'R2', testPrice = null) {
-    const config = pivotService.getConfig();
-    const currentPrice = testPrice ? parseFloat(testPrice) : (config[level.toLowerCase()] || 4442.30);
-    const levelPrice = config[level.toLowerCase()] || currentPrice;
-    const prevPrice = parseFloat((currentPrice - 0.35).toFixed(2));
-
-    return this.triggerAlertPipeline({
-      symbol: 'XAUUSD',
-      level,
-      levelPrice,
-      currentPrice,
-      previousPrice: prevPrice,
-      direction: level.startsWith('R') ? 'TOUCH_RESISTANCE' : 'TOUCH_SUPPORT',
-      tolerance: config.tolerance || 0.20,
-      triggerReason: `[TEST TRIGGER] Simulated test touch alert for ${level} at $${currentPrice.toFixed(2)}`,
-      isTest: true
-    });
-  }
-
-  getAlertStates() {
-    return { ...this.levelStates };
-  }
-
-  resetLevel(level) {
-    if (this.levelStates[level]) {
-      this.levelStates[level] = { status: 'READY', lastTriggerPrice: null, lastTriggerTime: null };
-      logger.info(`Level ${level} manually reset to READY.`);
-      return true;
-    }
-    return false;
   }
 }
 

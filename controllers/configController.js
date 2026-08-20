@@ -3,7 +3,8 @@ import { marketDataService } from '../services/marketDataService.js';
 
 export const getConfig = async (req, res) => {
   try {
-    const config = pivotService.getConfig();
+    const { symbol } = req.query;
+    const config = pivotService.getConfig(symbol);
     res.json({ success: true, data: config });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -12,14 +13,17 @@ export const getConfig = async (req, res) => {
 
 export const updateConfig = async (req, res) => {
   try {
-    const updated = await pivotService.updateManualConfig(req.body);
-    // If autoCalculatePivot was explicitly turned ON without specifying manual levels, calculate immediately
-    if (req.body.autoCalculatePivot === true && !req.body.r3 && !req.body.r2) {
-      const data = marketDataService.getMarketData();
-      const recalculated = await pivotService.autoRecalculateFromMarket(data);
-      return res.json({ success: true, data: recalculated });
-    }
-    res.json({ success: true, data: updated });
+    const { symbol, pivotType, pivotTimeframe } = req.body;
+    const targetSymbol = symbol || pivotService.getConfig().symbol;
+    
+    // Recalculate with new options if requested
+    const state = await pivotService.getOrCalculatePivotsForSymbol(targetSymbol, {
+      pivotType: pivotType || req.body.pivotType,
+      pivotTimeframe: pivotTimeframe || req.body.pivotTimeframe
+    });
+
+    const config = pivotService.getConfig(targetSymbol);
+    res.json({ success: true, data: config, pivotState: state });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -27,12 +31,13 @@ export const updateConfig = async (req, res) => {
 
 export const calculatePivots = async (req, res) => {
   try {
-    const { high, low, close } = req.body;
+    const { symbol, high, low, close, open, pivotType } = req.body;
     if (!high || !low || !close) {
       return res.status(400).json({ success: false, error: 'High, Low, and Close prices required' });
     }
-    const updated = await pivotService.updateDailyPivots(high, low, close);
-    res.json({ success: true, data: updated });
+    const targetSymbol = symbol || pivotService.getConfig().symbol;
+    const calc = pivotService.calculatePivotsFromOHLC({ high, low, close, open, pivotType });
+    res.json({ success: true, data: calc });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -40,8 +45,9 @@ export const calculatePivots = async (req, res) => {
 
 export const autoCalculatePivots = async (req, res) => {
   try {
-    const data = marketDataService.getMarketData();
-    const updated = await pivotService.autoRecalculateFromMarket(data);
+    const { symbol, pivotType, pivotTimeframe } = req.body;
+    const targetSymbol = symbol || pivotService.getConfig().symbol;
+    const updated = await pivotService.getOrCalculatePivotsForSymbol(targetSymbol, { pivotType, pivotTimeframe });
     res.json({ success: true, data: updated });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -50,8 +56,10 @@ export const autoCalculatePivots = async (req, res) => {
 
 export const getPivotHistory = async (req, res) => {
   try {
-    const history = pivotService.getPreviousSessions();
-    res.json({ success: true, data: history });
+    const { symbol } = req.query;
+    const targetSymbol = (symbol || pivotService.getConfig().symbol).toUpperCase();
+    const pivotState = pivotService.getPivotState(targetSymbol);
+    res.json({ success: true, data: pivotState ? [pivotState] : [] });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }

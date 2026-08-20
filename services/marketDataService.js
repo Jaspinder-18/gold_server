@@ -3,21 +3,23 @@ import axios from 'axios';
 import WebSocket from 'ws';
 import { logger } from '../utils/logger.js';
 import { MarketSnapshot } from '../models/MarketSnapshot.js';
+import { symbolService } from './symbolService.js';
 import { pivotService } from './pivotService.js';
 
 class MarketDataService extends EventEmitter {
   constructor() {
     super();
-    this.symbol = process.env.XAUUSD_SYMBOL || 'XAUUSD';
-    this.tvTicker = process.env.TRADINGVIEW_TICKER || 'OANDA:XAUUSD';
-    this.provider = process.env.MARKET_DATA_PROVIDER || 'tradingview';
-    this.pollingInterval = parseInt(process.env.POLLING_INTERVAL_MS || '2000', 10);
+    this.activeSymbol = 'XAUUSD';
+    this.pollingInterval = 2000;
 
     this.basePrice = null;
     this.currentData = {
       symbol: 'XAU/USD',
       rawSymbol: 'XAUUSD',
-      provider: 'TradingView Real-Time (OANDA / Spot Stream)',
+      displayName: 'Gold / USD Spot',
+      assetType: 'COMMODITY',
+      exchange: 'OANDA',
+      provider: 'TradingView Real-Time (OANDA)',
       price: null,
       previousPrice: null,
       bid: null,
@@ -30,7 +32,8 @@ class MarketDataService extends EventEmitter {
       volume: null,
       marketStatus: 'CONNECTING...',
       connected: false,
-      lastUpdated: new Date()
+      lastUpdated: new Date(),
+      distances: {}
     };
 
     this.klines = [];
@@ -42,290 +45,363 @@ class MarketDataService extends EventEmitter {
   }
 
   async initialize() {
-    logger.market(`Initializing Market Data Feed for ${this.symbol} via ${this.provider}...`);
+    await symbolService.initialize();
+    this.activeSymbol = symbolService.getActiveSymbol();
     
-    // 1. Fetch historical klines
-    await this.fetchHistoricalKlines();
+    logger.market(`Initializing Real-Time Market Feed for Active Symbol '${this.activeSymbol}'...`);
 
-    // 2. Fetch initial real market quote
-    await this.fetchTradingViewQuote();
+    // Listen to symbol changes
+    symbolService.on('activeSymbolChanged', async ({ activeSymbol }) => {
+      await this.switchSymbol(activeSymbol);
+    });
 
-    // 3. Connect real-time high-speed WebSocket stream
-    this.initWebSocketStream();
+    await this.setupActiveSymbolFeed();
 
-    // 4. Start continuous micro-tick pulse (only runs when basePrice is verified)
-    this.startMicroTickPulse();
-
-    // 5. Polling fallback for baseline sync
-    this.startPolling();
-
-    // 6. Periodic snapshot persistence in DB (every 60s)
+    // Snapshot persistence every 60s
+    if (this.snapshotTimer) clearInterval(this.snapshotTimer);
     this.snapshotTimer = setInterval(() => this.saveSnapshot(), 60000);
-
-    logger.market(`Market Data Service initialized. Live Price: $${this.currentData.price || 'FETCHING'}`);
   }
 
-  // Continuous micro-tick stream engine (only active when live verified basePrice exists)
+  async switchSymbol(newSymbolStr) {
+    const sym = newSymbolStr.toUpperCase();
+    if (this.activeSymbol === sym && this.currentData.connected) return;
+
+    logger.market(`🔄 MarketDataService switching active symbol from ${this.activeSymbol} to ${sym}...`);
+    this.activeSymbol = sym;
+
+    // Reset current data
+    const symConfig = symbolService.getSymbol(sym) || symbolService.getActiveSymbolConfig();
+    this.basePrice = null;
+    this.currentData = {
+      symbol: symConfig.displayName || sym,
+      rawSymbol: sym,
+      displayName: symConfig.displayName,
+      assetType: symConfig.assetType,
+      exchange: symConfig.exchange,
+      provider: symConfig.provider,
+      price: null,
+      previousPrice: null,
+      bid: null,
+      ask: null,
+      high24h: null,
+      low24h: null,
+      open: null,
+      change: null,
+      changePercent: null,
+      volume: null,
+      marketStatus: 'SWITCHING...',
+      connected: false,
+      lastUpdated: new Date(),
+      distances: {}
+    };
+
+    this.klines = [];
+
+    // Tear down existing WebSocket
+    if (this.ws) {
+      try {
+        this.ws.terminate();
+      } catch (e) {}
+      this.ws = null;
+      this.isWsConnected = false;
+    }
+
+    await this.setupActiveSymbolFeed();
+  }
+
+  async setupActiveSymbolFeed() {
+    const symConfig = symbolService.getSymbol(this.activeSymbol) || symbolService.getActiveSymbolConfig();
+    
+    // 1. Fetch initial live quote
+    await this.fetchLiveQuoteForActiveSymbol();
+
+    // 2. If Crypto, initialize high-speed WebSocket stream
+    if (symConfig.assetType === 'CRYPTO') {
+      this.initCryptoWebSocketStream(this.activeSymbol);
+    }
+
+    // 3. Start micro-tick pulse (runs only when verified live price exists)
+    this.startMicroTickPulse();
+
+    // 4. Start polling sync
+    this.startPolling();
+  }
+
+  /**
+   * Primary live quote fetcher supporting TradingView Scanner, Yahoo Finance, and Binance
+   */
+  async fetchLiveQuoteForActiveSymbol() {
+    const sym = this.activeSymbol;
+    const symConfig = symbolService.getSymbol(sym) || symbolService.getActiveSymbolConfig();
+    const decimals = symConfig.priceDecimals || 2;
+
+    // 1. Crypto: Binance Ticker API
+    if (symConfig.assetType === 'CRYPTO') {
+      try {
+        const pair = sym.includes('USD') && !sym.includes('USDT') ? `${sym.replace('USD', 'USDT')}` : sym;
+        const res = await axios.get(`https://api.binance.com/api/v3/ticker/24hr?symbol=${pair}`, { timeout: 4500 });
+        if (res.data && res.data.lastPrice) {
+          const price = parseFloat(parseFloat(res.data.lastPrice).toFixed(decimals));
+          const open = parseFloat(parseFloat(res.data.openPrice).toFixed(decimals));
+          const high = parseFloat(parseFloat(res.data.highPrice).toFixed(decimals));
+          const low = parseFloat(parseFloat(res.data.lowPrice).toFixed(decimals));
+          const bid = parseFloat(parseFloat(res.data.bidPrice || (price - 0.50)).toFixed(decimals));
+          const ask = parseFloat(parseFloat(res.data.askPrice || (price + 0.50)).toFixed(decimals));
+          const change = parseFloat((price - open).toFixed(decimals));
+          const changePercent = parseFloat(((change / open) * 100).toFixed(2));
+          const volume = parseFloat(parseFloat(res.data.volume).toFixed(2));
+
+          this.updateMarketState({ price, open, high, low, bid, ask, change, changePercent, volume });
+          return;
+        }
+      } catch (err) {
+        logger.warn(`Binance 24hr quote failed for ${sym}: ${err.message}`);
+      }
+    }
+
+    // 2. TradingView Scanner API (Forex, Commodities, Indices, Stocks)
+    try {
+      const tvTicker = symConfig.tradingViewTicker || `OANDA:${sym}`;
+      const response = await axios.post(
+        'https://scanner.tradingview.com/cfd/scan',
+        {
+          symbols: { tickers: [tvTicker, `OANDA:${sym}`, `FX_IDC:${sym}`, `PEPPERSTONE:${sym}`] },
+          columns: ['name', 'close', 'change', 'change_abs', 'high', 'low', 'open', 'bid', 'ask', 'volume']
+        },
+        { headers: { 'Content-Type': 'application/json' }, timeout: 4500 }
+      );
+
+      if (response.data?.data?.[0]?.d) {
+        const [, close, change, change_abs, high, low, open, bid, ask, volume] = response.data.data[0].d;
+        if (close && !isNaN(close)) {
+          const price = parseFloat(parseFloat(close).toFixed(decimals));
+          const o = open ? parseFloat(parseFloat(open).toFixed(decimals)) : price;
+          const h = high ? parseFloat(parseFloat(high).toFixed(decimals)) : price;
+          const l = low ? parseFloat(parseFloat(low).toFixed(decimals)) : price;
+          const b = bid ? parseFloat(parseFloat(bid).toFixed(decimals)) : parseFloat((price - (0.01 * Math.pow(10, -decimals + 2))).toFixed(decimals));
+          const a = ask ? parseFloat(parseFloat(ask).toFixed(decimals)) : parseFloat((price + (0.01 * Math.pow(10, -decimals + 2))).toFixed(decimals));
+          const chg = change_abs !== null ? parseFloat(parseFloat(change_abs).toFixed(decimals)) : parseFloat((price - o).toFixed(decimals));
+          const chgPct = change !== null ? parseFloat(parseFloat(change).toFixed(2)) : parseFloat(((chg / o) * 100).toFixed(2));
+
+          this.updateMarketState({ price, open: o, high: h, low: l, bid: b, ask: a, change: chg, changePercent: chgPct, volume: volume || 0 });
+          return;
+        }
+      }
+    } catch (tvErr) {
+      // Fall through to Yahoo Finance
+    }
+
+    // 3. Yahoo Finance Fallback
+    const yfMap = {
+      XAUUSD: 'GC=F',
+      XAGUSD: 'SI=F',
+      EURUSD: 'EURUSD=X',
+      GBPUSD: 'GBPUSD=X',
+      USDJPY: 'JPY=X',
+      NIFTY: '^NSEI',
+      BANKNIFTY: '^NSEBANK',
+      US30: '^DJI',
+      SPX: '^GSPC',
+      NASDAQ: '^IXIC',
+      AAPL: 'AAPL',
+      TSLA: 'TSLA',
+      NVDA: 'NVDA'
+    };
+
+    const yfSymbol = yfMap[sym] || sym;
+    try {
+      const res = await axios.get(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yfSymbol)}?interval=1m&range=1d`, {
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+        timeout: 4500
+      });
+
+      const meta = res.data?.chart?.result?.[0]?.meta;
+      if (meta && meta.regularMarketPrice) {
+        const price = parseFloat(parseFloat(meta.regularMarketPrice).toFixed(decimals));
+        const prevClose = meta.previousClose || meta.chartPreviousClose || price;
+        const open = meta.regularMarketOpen || prevClose;
+        const high = meta.regularMarketDayHigh || price;
+        const low = meta.regularMarketDayLow || price;
+        const change = parseFloat((price - prevClose).toFixed(decimals));
+        const changePercent = parseFloat(((change / prevClose) * 100).toFixed(2));
+
+        this.updateMarketState({
+          price,
+          open,
+          high,
+          low,
+          bid: parseFloat((price - (0.01 * Math.pow(10, -decimals + 2))).toFixed(decimals)),
+          ask: parseFloat((price + (0.01 * Math.pow(10, -decimals + 2))).toFixed(decimals)),
+          change,
+          changePercent,
+          volume: meta.regularMarketVolume || 0
+        });
+        return;
+      }
+    } catch (yfErr) {
+      logger.warn(`Yahoo Finance quote failed for ${sym} (${yfSymbol}): ${yfErr.message}`);
+    }
+  }
+
+  updateMarketState({ price, open, high, low, bid, ask, change, changePercent, volume }) {
+    const prev = this.currentData.price;
+    const symConfig = symbolService.getSymbol(this.activeSymbol) || symbolService.getActiveSymbolConfig();
+    const decimals = symConfig.priceDecimals || 2;
+
+    this.basePrice = price;
+    this.currentData.price = price;
+    this.currentData.previousPrice = prev;
+    this.currentData.open = open;
+    this.currentData.high24h = high;
+    this.currentData.low24h = low;
+    this.currentData.bid = bid;
+    this.currentData.ask = ask;
+    this.currentData.change = change;
+    this.currentData.changePercent = changePercent;
+    this.currentData.volume = volume;
+    this.currentData.marketStatus = 'LIVE';
+    this.currentData.connected = true;
+    this.currentData.lastUpdated = new Date();
+
+    // Calculate dynamic distance to active pivot levels
+    const pivot = pivotService.getActivePivotState();
+    if (pivot && price) {
+      this.currentData.distances = {
+        r3: parseFloat(Math.abs(price - pivot.r3).toFixed(decimals)),
+        r2: parseFloat(Math.abs(price - pivot.r2).toFixed(decimals)),
+        r1: parseFloat(Math.abs(price - (pivot.r1 || pivot.p)).toFixed(decimals)),
+        pivot: parseFloat(Math.abs(price - pivot.p).toFixed(decimals)),
+        s1: parseFloat(Math.abs(price - (pivot.s1 || pivot.p)).toFixed(decimals)),
+        s2: parseFloat(Math.abs(price - pivot.s2).toFixed(decimals)),
+        s3: parseFloat(Math.abs(price - pivot.s3).toFixed(decimals))
+      };
+    }
+
+    const tickType = prev ? (price >= prev ? 'UP' : 'DOWN') : 'UP';
+    this.emit('tick', { ...this.currentData, tickType });
+  }
+
+  /**
+   * Continuous micro-tick stream for high responsiveness (tightly pinned to live base price)
+   */
   startMicroTickPulse() {
     if (this.microTickTimer) clearInterval(this.microTickTimer);
-    
+
     this.microTickTimer = setInterval(() => {
       if (!this.basePrice || !this.currentData.connected || !this.currentData.price) return;
 
+      const symConfig = symbolService.getSymbol(this.activeSymbol) || symbolService.getActiveSymbolConfig();
+      const decimals = symConfig.priceDecimals || 2;
+      const isCrypto = symConfig.assetType === 'CRYPTO';
+
+      // For crypto with live WebSocket, rely on native ticks
+      if (isCrypto && this.isWsConnected) return;
+
+      const stepUnit = Math.pow(10, -decimals);
+      const stepMultiplier = decimals >= 4 ? (1 + Math.floor(Math.random() * 3)) : (1 + Math.floor(Math.random() * 8));
+      const step = parseFloat((stepUnit * stepMultiplier).toFixed(decimals));
+
       const isUp = Math.random() >= 0.5;
-      const step = 0.02 + Math.random() * 0.12; // $0.02 to $0.14 tick step
       const delta = isUp ? step : -step;
       const prev = this.currentData.price;
-      const newPrice = parseFloat((this.currentData.price + delta).toFixed(2));
+      const newPrice = parseFloat((this.currentData.price + delta).toFixed(decimals));
 
-      // Stay pinned within tight 80-cent micro band of real market base price
-      if (Math.abs(newPrice - this.basePrice) > 0.80) {
-        this.currentData.price = parseFloat((this.basePrice + (isUp ? -0.10 : 0.10)).toFixed(2));
+      const maxBand = this.basePrice * 0.0008; // 0.08% micro band around live price
+      if (Math.abs(newPrice - this.basePrice) > maxBand) {
+        this.currentData.price = parseFloat((this.basePrice + (isUp ? -step : step)).toFixed(decimals));
       } else {
         this.currentData.price = newPrice;
       }
 
       this.currentData.previousPrice = prev;
-      this.currentData.bid = parseFloat((this.currentData.price - 0.25).toFixed(2));
-      this.currentData.ask = parseFloat((this.currentData.price + 0.25).toFixed(2));
+      this.currentData.bid = parseFloat((this.currentData.price - step).toFixed(decimals));
+      this.currentData.ask = parseFloat((this.currentData.price + step).toFixed(decimals));
       this.currentData.lastUpdated = new Date();
 
-      // Update 24h change
       if (this.currentData.open) {
-        this.currentData.change = parseFloat((this.currentData.price - this.currentData.open).toFixed(2));
+        this.currentData.change = parseFloat((this.currentData.price - this.currentData.open).toFixed(decimals));
         this.currentData.changePercent = parseFloat(((this.currentData.change / this.currentData.open) * 100).toFixed(2));
       }
 
-      this.updateLiveCandle(this.currentData.price);
+      // Recompute distances
+      const pivot = pivotService.getActivePivotState();
+      if (pivot) {
+        this.currentData.distances = {
+          r3: parseFloat(Math.abs(this.currentData.price - pivot.r3).toFixed(decimals)),
+          r2: parseFloat(Math.abs(this.currentData.price - pivot.r2).toFixed(decimals)),
+          r1: parseFloat(Math.abs(this.currentData.price - (pivot.r1 || pivot.p)).toFixed(decimals)),
+          pivot: parseFloat(Math.abs(this.currentData.price - pivot.p).toFixed(decimals)),
+          s1: parseFloat(Math.abs(this.currentData.price - (pivot.s1 || pivot.p)).toFixed(decimals)),
+          s2: parseFloat(Math.abs(this.currentData.price - pivot.s2).toFixed(decimals)),
+          s3: parseFloat(Math.abs(this.currentData.price - pivot.s3).toFixed(decimals))
+        };
+      }
+
       this.emit('tick', { ...this.currentData, tickType: isUp ? 'UP' : 'DOWN' });
     }, 250);
   }
 
-  // Primary TradingView Scanner API fetch + Yahoo Finance fallback
-  async fetchTradingViewQuote() {
+  /**
+   * Binance Live WebSocket Stream for Crypto
+   */
+  initCryptoWebSocketStream(symbolStr) {
+    const sym = symbolStr.toUpperCase();
+    const pair = (sym.includes('USD') && !sym.includes('USDT') ? `${sym.replace('USD', 'USDT')}` : sym).toLowerCase();
+    const wsUrl = `wss://stream.binance.com:9443/ws/${pair}@ticker`;
+
     try {
-      const response = await axios.post(
-        'https://scanner.tradingview.com/cfd/scan',
-        {
-          symbols: {
-            tickers: [
-              this.tvTicker,
-              'OANDA:XAUUSD',
-              'FOREXCOM:XAUUSD',
-              'FX_IDC:XAUUSD',
-              'PEPPERSTONE:XAUUSD'
-            ]
-          },
-          columns: [
-            'name',
-            'close',
-            'change',
-            'change_abs',
-            'high',
-            'low',
-            'open',
-            'bid',
-            'ask',
-            'volume'
-          ]
-        },
-        {
-          headers: { 'Content-Type': 'application/json' },
-          timeout: 4500
-        }
-      );
-
-      if (response.data && response.data.data && response.data.data.length > 0) {
-        const item = response.data.data[0];
-        const [name, close, change, change_abs, high, low, open, bid, ask, volume] = item.d;
-
-        if (close && !isNaN(close) && close > 1000) {
-          const newPrice = parseFloat(parseFloat(close).toFixed(2));
-          this.basePrice = newPrice;
-          this.currentData.price = newPrice;
-          this.currentData.bid = bid ? parseFloat(parseFloat(bid).toFixed(2)) : parseFloat((newPrice - 0.25).toFixed(2));
-          this.currentData.ask = ask ? parseFloat(parseFloat(ask).toFixed(2)) : parseFloat((newPrice + 0.25).toFixed(2));
-          if (high) this.currentData.high24h = parseFloat(high);
-          if (low) this.currentData.low24h = parseFloat(low);
-          if (open) this.currentData.open = parseFloat(open);
-          if (change_abs) this.currentData.change = parseFloat(change_abs);
-          if (change) this.currentData.changePercent = parseFloat(change);
-          if (volume) this.currentData.volume = parseInt(volume, 10);
-          this.currentData.marketStatus = 'LIVE';
-          this.currentData.connected = true;
-          this.currentData.lastUpdated = new Date();
-          
-          this.updateLiveCandle(newPrice);
-          this.emit('tick', { ...this.currentData });
-          this.checkAutoRecalculate();
-          return this.currentData;
-        }
-      }
-    } catch (err) {
-      logger.warn(`TradingView scanner query error: ${err.message}. Fetching Yahoo Finance Gold stream...`);
-    }
-
-    // High-reliability fallback: Yahoo Finance Gold Spot / Futures Stream
-    try {
-      const yRes = await axios.get('https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=1m&range=1d', { timeout: 4500 });
-      const meta = yRes.data?.chart?.result?.[0]?.meta;
-      if (meta && meta.regularMarketPrice && meta.regularMarketPrice > 1000) {
-        const newPrice = parseFloat(meta.regularMarketPrice.toFixed(2));
-        this.basePrice = newPrice;
-        this.currentData.price = newPrice;
-        this.currentData.bid = parseFloat((newPrice - 0.25).toFixed(2));
-        this.currentData.ask = parseFloat((newPrice + 0.25).toFixed(2));
-        if (meta.regularMarketDayHigh) this.currentData.high24h = parseFloat(meta.regularMarketDayHigh.toFixed(2));
-        if (meta.regularMarketDayLow) this.currentData.low24h = parseFloat(meta.regularMarketDayLow.toFixed(2));
-        if (meta.previousClose) {
-          this.currentData.open = parseFloat(meta.previousClose.toFixed(2));
-          this.currentData.change = parseFloat((newPrice - meta.previousClose).toFixed(2));
-          this.currentData.changePercent = parseFloat(((this.currentData.change / meta.previousClose) * 100).toFixed(2));
-        }
-        this.currentData.marketStatus = 'LIVE';
-        this.currentData.connected = true;
-        this.currentData.lastUpdated = new Date();
-
-        this.updateLiveCandle(newPrice);
-        this.emit('tick', { ...this.currentData });
-        this.checkAutoRecalculate();
-        return this.currentData;
-      }
-    } catch (yErr) {
-      logger.warn(`Yahoo Gold stream error: ${yErr.message}`);
-    }
-
-    return this.currentData;
-  }
-
-  checkAutoRecalculate() {
-    try {
-      const now = Date.now();
-      if (!this.lastAutoCalcTime || (now - this.lastAutoCalcTime > 5000)) {
-        this.lastAutoCalcTime = now;
-        pivotService.autoRecalculateFromMarket(this.currentData).catch(() => {});
-      }
-    } catch (err) {
-      // Ignore
-    }
-  }
-
-  // Real-time WebSocket stream
-  initWebSocketStream() {
-    try {
-      const wsUrl = 'wss://stream.binance.com:9443/stream?streams=paxgusdt@trade/paxgusdt@bookTicker/paxgusdt@ticker';
       this.ws = new WebSocket(wsUrl);
 
       this.ws.on('open', () => {
         this.isWsConnected = true;
-        this.currentData.connected = true;
-        logger.info('⚡ High-speed WebSocket streaming connection established (multi-tick real-time feed).');
+        logger.market(`⚡ Binance WebSocket stream connected for ${sym} (${pair}).`);
       });
 
-      this.ws.on('message', (raw) => {
+      this.ws.on('message', (msg) => {
         try {
-          const msg = JSON.parse(raw);
-          const data = msg.data || msg;
+          const data = JSON.parse(msg.toString());
+          if (data.c && this.activeSymbol === sym) {
+            const symConfig = symbolService.getSymbol(sym);
+            const decimals = symConfig?.priceDecimals || 2;
+            const price = parseFloat(parseFloat(data.c).toFixed(decimals));
+            const open = parseFloat(parseFloat(data.o).toFixed(decimals));
+            const high = parseFloat(parseFloat(data.h).toFixed(decimals));
+            const low = parseFloat(parseFloat(data.l).toFixed(decimals));
+            const bid = parseFloat(parseFloat(data.b).toFixed(decimals));
+            const ask = parseFloat(parseFloat(data.a).toFixed(decimals));
+            const change = parseFloat(parseFloat(data.p).toFixed(decimals));
+            const changePercent = parseFloat(parseFloat(data.P).toFixed(2));
+            const volume = parseFloat(parseFloat(data.v).toFixed(2));
 
-          if (data.e === 'trade' && data.p) {
-            const tradePrice = parseFloat(parseFloat(data.p).toFixed(2));
-            this.basePrice = tradePrice;
-            this.currentData.previousPrice = this.currentData.price;
-            this.currentData.price = tradePrice;
-            this.currentData.lastUpdated = new Date();
-            this.updateLiveCandle(tradePrice);
-            this.emit('tick', { ...this.currentData });
-          } else if (data.e === '24hrTicker') {
-            if (data.h) this.currentData.high24h = parseFloat(data.h);
-            if (data.l) this.currentData.low24h = parseFloat(data.l);
-            if (data.o) this.currentData.open = parseFloat(data.o);
-            if (data.p) this.currentData.change = parseFloat(data.p);
-            if (data.P) this.currentData.changePercent = parseFloat(data.P);
-            this.checkAutoRecalculate();
+            this.updateMarketState({ price, open, high, low, bid, ask, change, changePercent, volume });
           }
-        } catch (e) {
-          // ignore
-        }
+        } catch (e) {}
       });
 
-      this.ws.on('error', (err) => {
+      this.ws.on('error', () => {
         this.isWsConnected = false;
       });
 
       this.ws.on('close', () => {
         this.isWsConnected = false;
-        setTimeout(() => this.initWebSocketStream(), 3000);
       });
     } catch (err) {
-      logger.error('Failed to initialize WebSocket stream', err);
+      logger.error('WebSocket stream init error', err);
     }
-  }
-
-  updateLiveCandle(price) {
-    if (this.klines.length === 0) return;
-    const lastCandle = this.klines[this.klines.length - 1];
-    const now = Math.floor(Date.now() / 1000);
-    const intervalSeconds = 300;
-
-    if (now < lastCandle.time + intervalSeconds) {
-      lastCandle.high = Math.max(lastCandle.high, price);
-      lastCandle.low = Math.min(lastCandle.low, price);
-      lastCandle.close = price;
-    } else {
-      const newCandle = {
-        time: lastCandle.time + intervalSeconds,
-        open: lastCandle.close,
-        high: Math.max(lastCandle.close, price),
-        low: Math.min(lastCandle.close, price),
-        close: price,
-        volume: 10
-      };
-      this.klines.push(newCandle);
-      if (this.klines.length > 200) this.klines.shift();
-    }
-  }
-
-  async fetchHistoricalKlines(count = 120) {
-    const urls = [
-      `https://data-api.binance.vision/api/v3/klines?symbol=PAXGUSDT&interval=5m&limit=${count}`,
-      `https://api.binance.us/api/v3/klines?symbol=PAXGUSDT&interval=5m&limit=${count}`,
-      `https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval=5m&limit=${count}`
-    ];
-
-    for (const url of urls) {
-      try {
-        const res = await axios.get(url, { timeout: 4000 });
-        if (res.data && Array.isArray(res.data) && res.data.length > 0) {
-          this.klines = res.data.map(k => ({
-            time: Math.floor(k[0] / 1000),
-            open: parseFloat(k[1]),
-            high: parseFloat(k[2]),
-            low: parseFloat(k[3]),
-            close: parseFloat(k[4]),
-            volume: parseFloat(k[5])
-          }));
-          logger.info(`Loaded ${this.klines.length} historical 5m candlesticks from ${url.split('?')[0]}.`);
-          return;
-        }
-      } catch (err) {
-        // try next url
-      }
-    }
-    logger.warn('Could not reach remote klines API, initialized live session candle buffer.');
   }
 
   startPolling() {
     if (this.pollTimer) clearInterval(this.pollTimer);
     this.pollTimer = setInterval(async () => {
-      await this.fetchTradingViewQuote();
+      await this.fetchLiveQuoteForActiveSymbol();
     }, this.pollingInterval);
   }
 
   async saveSnapshot() {
     try {
-      if (this.currentData.price) {
+      if (this.currentData.price && this.currentData.connected) {
         await MarketSnapshot.create({
-          symbol: 'XAUUSD',
+          symbol: this.activeSymbol,
           provider: this.currentData.provider,
           price: this.currentData.price,
           bid: this.currentData.bid,
@@ -339,9 +415,7 @@ class MarketDataService extends EventEmitter {
           timestamp: new Date()
         });
       }
-    } catch (err) {
-      // Ignore
-    }
+    } catch (err) {}
   }
 
   getCurrentPrice() {

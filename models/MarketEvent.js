@@ -8,6 +8,25 @@ const MarketEventSchema = new mongoose.Schema({
     trim: true,
     index: true
   },
+  assetType: {
+    type: String,
+    default: 'COMMODITY'
+  },
+  exchange: {
+    type: String,
+    default: 'OANDA'
+  },
+  pivotType: {
+    type: String,
+    default: 'TRADITIONAL'
+  },
+  pivotTimeframe: {
+    type: String,
+    default: 'DAILY'
+  },
+  pivotPeriod: {
+    type: String
+  },
   currentPrice: {
     type: Number,
     required: true
