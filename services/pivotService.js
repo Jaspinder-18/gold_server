@@ -151,6 +151,7 @@ class PivotService extends EventEmitter {
       return {
         symbol: 'XAUUSD',
         enabled: true,
+        autoCalculatePivot: false,
         r3: 4473.76,
         r2: 4432.84,
         s2: 4300.45,
@@ -165,6 +166,21 @@ class PivotService extends EventEmitter {
       };
     }
     return typeof this.config.toObject === 'function' ? this.config.toObject() : { ...this.config };
+  }
+
+  getPreviousSessions() {
+    const cfg = this.getConfig();
+    return [
+      {
+        session: 'Active Live Session',
+        pivot: cfg.pivot || 4366.64,
+        r3: cfg.r3,
+        r2: cfg.r2,
+        s2: cfg.s2,
+        s3: cfg.s3,
+        lastCalculatedAt: cfg.lastCalculatedAt || new Date()
+      }
+    ];
   }
 
   // Calculate live distance metrics for ONLY R3, R2, S2, S3
