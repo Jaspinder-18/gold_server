@@ -403,10 +403,10 @@ class ScreenshotService {
 
     // Strictly the 4 levels: R3, R2, S2, S3
     const levels = [
-      { name: 'R3', price: pivotConfig.r3 || 4473.76 },
-      { name: 'R2', price: pivotConfig.r2 || 4432.84 },
-      { name: 'S2', price: pivotConfig.s2 || 4300.45 },
-      { name: 'S3', price: pivotConfig.s3 || 4259.54 }
+      { name: 'R3', price: pivotConfig.r3 || 4657.02 },
+      { name: 'R2', price: pivotConfig.r2 || 4580.75 },
+      { name: 'S2', price: pivotConfig.s2 || 4333.97 },
+      { name: 'S3', price: pivotConfig.s3 || 4257.70 }
     ];
 
     const firstCandle = candles[0] || { open: currentPrice, high: currentPrice, low: currentPrice, close: currentPrice };

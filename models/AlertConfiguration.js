@@ -13,7 +13,7 @@ const AlertConfigurationSchema = new mongoose.Schema({
   },
   customChartUrl: {
     type: String,
-    default: ''
+    default: 'https://www.tradingview.com/chart/hRhqMpmT/?symbol=OANDA%3AXAUUSD'
   },
   chartTimeframe: {
     type: String,
@@ -34,16 +34,16 @@ const AlertConfigurationSchema = new mongoose.Schema({
   },
   autoCalculatePivot: {
     type: Boolean,
-    default: true
+    default: false
   },
-  // Floor Pivot Point values
+  // Floor / Fibonacci Pivot Point values
   r3: {
     type: Number,
-    default: 4447.32
+    default: 4657.02
   },
   r2: {
     type: Number,
-    default: 4442.28
+    default: 4580.75
   },
   r1: {
     type: Number,
@@ -51,7 +51,7 @@ const AlertConfigurationSchema = new mongoose.Schema({
   },
   pivot: {
     type: Number,
-    default: 4395.50
+    default: 4457.36
   },
   s1: {
     type: Number,
@@ -59,11 +59,11 @@ const AlertConfigurationSchema = new mongoose.Schema({
   },
   s2: {
     type: Number,
-    default: 4366.13
+    default: 4333.97
   },
   s3: {
     type: Number,
-    default: 4340.00
+    default: 4257.70
   },
   // Trigger tolerance in USD
   tolerance: {

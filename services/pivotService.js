@@ -21,13 +21,15 @@ class PivotService extends EventEmitter {
     if (!config) {
       config = await AlertConfiguration.create({
         symbol: 'XAUUSD',
+        tradingViewTicker: 'OANDA:XAUUSD',
+        customChartUrl: 'https://www.tradingview.com/chart/hRhqMpmT/?symbol=OANDA%3AXAUUSD',
         enabled: true,
-        autoCalculatePivot: true,
+        autoCalculatePivot: false,
         pivotType: 'FIBONACCI',
-        r3: 4473.76,
-        r2: 4432.84,
-        s2: 4300.45,
-        s3: 4259.54,
+        r3: 4657.02,
+        r2: 4580.75,
+        s2: 4333.97,
+        s3: 4257.70,
         tolerance: parseFloat(process.env.LEVEL_TOUCH_TOLERANCE || '0.20'),
         retriggerDistance: parseFloat(process.env.RETRIGGER_DISTANCE || '1.00'),
         monitoredLevels: ['R3', 'R2', 'S2', 'S3'],
@@ -37,25 +39,27 @@ class PivotService extends EventEmitter {
         telegramAlertsEnabled: true,
         lastCalculatedAt: new Date()
       });
-      logger.info('Created Gold Alert Configuration with exact chart levels in MongoDB.');
+      logger.info('Created Gold Alert Configuration with exact TradingView market levels in MongoDB.');
     } else {
-      // Ensure defaults exist
-      if (config.autoCalculatePivot === undefined) config.autoCalculatePivot = true;
-      if (!config.r3) config.r3 = 4473.76;
-      if (!config.r2) config.r2 = 4432.84;
-      if (!config.s2) config.s2 = 4300.45;
-      if (!config.s3) config.s3 = 4259.54;
+      // Sync to exact TradingView market chart levels
+      config.r3 = 4657.02;
+      config.r2 = 4580.75;
+      config.s2 = 4333.97;
+      config.s3 = 4257.70;
+      config.customChartUrl = 'https://www.tradingview.com/chart/hRhqMpmT/?symbol=OANDA%3AXAUUSD';
       if (!config.chartRange) config.chartRange = '1D';
       if (!config.barSpacing) config.barSpacing = 22;
       await config.save();
     }
 
     this.config = config;
-    logger.info(`Pivot Levels Active -> R3: ${this.config.r3}, R2: ${this.config.r2}, S2: ${this.config.s2}, S3: ${this.config.s3} (Auto-Calc: ${this.config.autoCalculatePivot !== false ? 'ENABLED' : 'DISABLED'})`);
+    logger.info(`Pivot Levels Active -> R3: ${this.config.r3}, R2: ${this.config.r2}, S2: ${this.config.s2}, S3: ${this.config.s3}`);
     return this.config;
   }
 
   async autoRecalculateFromMarket(marketData) {
+    if (!this.config) await this.initialize();
+    if (!this.config.autoCalculatePivot) return this.config;
     if (!marketData || !marketData.price) return this.config;
     const price = parseFloat(marketData.price);
     const high = marketData.high24h && marketData.high24h > price ? parseFloat(marketData.high24h) : parseFloat((price + 32.0).toFixed(2));
