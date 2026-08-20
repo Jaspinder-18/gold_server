@@ -33,6 +33,12 @@ class AlertService extends EventEmitter {
       this.evaluateMarketPrice(data);
     });
 
+    // Listen to new pivot levels and rollover
+    pivotService.on('pivot:updated', ({ symbol, state }) => {
+      logger.alert(`🔄 Alert Engine re-binding to NEW pivot levels for ${symbol}: R3=${state.r3}, R2=${state.r2}, S2=${state.s2}, S3=${state.s3}`);
+      this.resetAllLevelStates(symbol);
+    });
+
     // Run initial cleanup to keep max 6 latest records
     await this.enforceMaxHistory(6);
 
@@ -66,6 +72,22 @@ class AlertService extends EventEmitter {
       result[k] = v.status;
     }
     return result;
+  }
+
+  resetAllLevelStates(symbolStr) {
+    const sym = (symbolStr || symbolService.getActiveSymbol()).toUpperCase();
+    if (this.symbolLevelStates.has(sym)) {
+      const states = this.symbolLevelStates.get(sym);
+      for (const key of Object.keys(states)) {
+        states[key] = { status: 'READY', lastTriggerPrice: null, lastTriggerTime: null };
+      }
+    } else {
+      this.getLevelState(sym, 'R3');
+    }
+    logger.alert(`✨ All level alert states for ${sym} have been reset to READY for new pivot period.`);
+    if (this.io) {
+      this.io.emit('alert:states', this.getAllLevelStates(sym));
+    }
   }
 
   resetLevelState(symbolStr, levelName) {

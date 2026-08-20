@@ -26,6 +26,17 @@ const PivotStateSchema = new mongoose.Schema({
   periodStart: Date,
   periodEnd: Date,
   periodDateStr: String, // e.g. '2026-08-19'
+  pivotPeriod: {
+    type: String,
+    required: true,
+    index: true // e.g. '2026-08-20' representing active trading session
+  },
+  status: {
+    type: String,
+    enum: ['ACTIVE', 'HISTORICAL'],
+    default: 'ACTIVE',
+    index: true
+  },
   high: {
     type: Number,
     required: true
@@ -65,6 +76,21 @@ const PivotStateSchema = new mongoose.Schema({
     required: true
   },
 
+  // Retained Previous Period Reference Levels
+  previousLevels: {
+    periodDateStr: String,
+    high: Number,
+    low: Number,
+    close: Number,
+    p: Number,
+    r1: Number,
+    r2: Number,
+    r3: Number,
+    s1: Number,
+    s2: Number,
+    s3: Number
+  },
+
   // Validation Status
   isValid: {
     type: Boolean,
@@ -86,6 +112,7 @@ const PivotStateSchema = new mongoose.Schema({
   timestamps: true
 });
 
-PivotStateSchema.index({ symbol: 1, pivotType: 1, pivotTimeframe: 1 }, { unique: true });
+PivotStateSchema.index({ symbol: 1, pivotType: 1, pivotTimeframe: 1, pivotPeriod: 1 }, { unique: true });
+PivotStateSchema.index({ symbol: 1, status: 1 });
 
 export const PivotState = mongoose.model('PivotState', PivotStateSchema);
