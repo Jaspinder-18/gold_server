@@ -146,17 +146,7 @@ const startServer = async () => {
     // 5. Initialize Market Data Live Feed
     await marketDataService.initialize();
 
-    // 6. Immediately calculate and activate fresh live Fibonacci levels from current live market
-    try {
-      const initialMarket = marketDataService.getMarketData();
-      if (initialMarket && initialMarket.price) {
-        await pivotService.autoRecalculateFromMarket(initialMarket);
-      }
-    } catch (calcErr) {
-      logger.warn(`Startup live pivot calculation error: ${calcErr.message}`);
-    }
-
-    // 7. Start HTTP & WebSocket Server
+    // 6. Start HTTP & WebSocket Server
     server.listen(PORT, () => {
       logger.info(`=======================================================`);
       logger.info(`  GOLD (XAU/USD) TRADINGVIEW ALERT ENGINE RUNNING      `);

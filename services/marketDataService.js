@@ -153,7 +153,6 @@ class MarketDataService extends EventEmitter {
           
           this.updateLiveCandle(newPrice);
           this.emit('tick', { ...this.currentData });
-          this.checkAutoRecalculate();
           return this.currentData;
         }
       }
@@ -164,18 +163,7 @@ class MarketDataService extends EventEmitter {
   }
 
   checkAutoRecalculate() {
-    try {
-      const config = pivotService.getConfig();
-      if (config && config.autoCalculatePivot) {
-        const now = Date.now();
-        if (!this.lastAutoCalcTime || (now - this.lastAutoCalcTime > 10000)) {
-          this.lastAutoCalcTime = now;
-          pivotService.autoRecalculateFromMarket(this.currentData).catch(() => {});
-        }
-      }
-    } catch (err) {
-      // Ignore
-    }
+    // Only recalculate when explicitly triggered
   }
 
   // Real-time WebSocket stream
