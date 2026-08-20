@@ -22,7 +22,7 @@ class PivotService extends EventEmitter {
       config = await AlertConfiguration.create({
         symbol: 'XAUUSD',
         enabled: true,
-        autoCalculatePivot: false,
+        autoCalculatePivot: true,
         pivotType: 'FIBONACCI',
         r3: 4473.76,
         r2: 4432.84,
@@ -39,7 +39,8 @@ class PivotService extends EventEmitter {
       });
       logger.info('Created Gold Alert Configuration with exact chart levels in MongoDB.');
     } else {
-      // Ensure defaults exist without overriding user custom levels if already stored
+      // Ensure defaults exist
+      if (config.autoCalculatePivot === undefined) config.autoCalculatePivot = true;
       if (!config.r3) config.r3 = 4473.76;
       if (!config.r2) config.r2 = 4432.84;
       if (!config.s2) config.s2 = 4300.45;
@@ -50,7 +51,7 @@ class PivotService extends EventEmitter {
     }
 
     this.config = config;
-    logger.info(`Pivot Levels Active -> R3: ${this.config.r3}, R2: ${this.config.r2}, S2: ${this.config.s2}, S3: ${this.config.s3}`);
+    logger.info(`Pivot Levels Active -> R3: ${this.config.r3}, R2: ${this.config.r2}, S2: ${this.config.s2}, S3: ${this.config.s3} (Auto-Calc: ${this.config.autoCalculatePivot !== false ? 'ENABLED' : 'DISABLED'})`);
     return this.config;
   }
 
@@ -61,7 +62,6 @@ class PivotService extends EventEmitter {
     const low = marketData.low24h && marketData.low24h < price ? parseFloat(marketData.low24h) : parseFloat((price - 32.0).toFixed(2));
     const close = marketData.open ? parseFloat(marketData.open) : price;
 
-    logger.info(`🔄 Auto-calculating Fibonacci levels from market (High: $${high}, Low: $${low}, Close/Price: $${price})...`);
     return await this.updateDailyPivots(high, low, close);
   }
 
@@ -82,6 +82,16 @@ class PivotService extends EventEmitter {
     const s2 = parseFloat((pivot - 0.618 * range).toFixed(2));
     const s3 = parseFloat((pivot - 1.000 * range).toFixed(2));
 
+    // If levels already match, don't re-save or re-broadcast
+    if (
+      this.config.r3 === r3 &&
+      this.config.r2 === r2 &&
+      this.config.s2 === s2 &&
+      this.config.s3 === s3
+    ) {
+      return this.config;
+    }
+
     this.config.dailyHigh = h;
     this.config.dailyLow = l;
     this.config.dailyClose = c;
@@ -95,7 +105,7 @@ class PivotService extends EventEmitter {
     this.config.lastCalculatedAt = new Date();
 
     await this.config.save();
-    logger.info(`✨ Calculated new Fibonacci levels: R3: ${r3}, R2: ${r2}, S2: ${s2}, S3: ${s3}`);
+    logger.info(`✨ Synchronized live Fibonacci levels from market (High: \$${h}, Low: \$${l}, Close/Price: \$${c}) -> R3: \$${r3}, R2: \$${r2}, S2: \$${s2}, S3: \$${s3}`);
 
     this.broadcastConfigUpdate();
     return this.config;
