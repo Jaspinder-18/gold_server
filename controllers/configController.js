@@ -13,14 +13,37 @@ export const getConfig = async (req, res) => {
 
 export const updateConfig = async (req, res) => {
   try {
-    const { symbol, pivotType, pivotTimeframe } = req.body;
-    const targetSymbol = symbol || pivotService.getConfig().symbol;
+    const { symbol, pivotType, pivotTimeframe, r3, r2, s2, s3, autoCalculatePivot } = req.body;
+    const targetSymbol = (symbol || pivotService.getConfig().symbol).toUpperCase();
     
-    // Recalculate with new options if requested
-    const state = await pivotService.getOrCalculatePivotsForSymbol(targetSymbol, {
-      pivotType: pivotType || req.body.pivotType,
-      pivotTimeframe: pivotTimeframe || req.body.pivotTimeframe
-    });
+    let state;
+    if (autoCalculatePivot !== false && (!r3 || !r2 || !s2 || !s3)) {
+      // Recalculate with new options if requested
+      state = await pivotService.getOrCalculatePivotsForSymbol(targetSymbol, {
+        pivotType: pivotType || 'FIBONACCI',
+        pivotTimeframe: pivotTimeframe || 'DAILY',
+        force: true
+      });
+    } else if (r3 && r2 && s2 && s3) {
+      // Manual custom level override
+      const currentState = pivotService.getPivotState(targetSymbol) || {};
+      state = {
+        ...currentState,
+        symbol: targetSymbol,
+        pivotType: pivotType || 'FIBONACCI',
+        pivotTimeframe: pivotTimeframe || 'DAILY',
+        r3: parseFloat(r3),
+        r2: parseFloat(r2),
+        s2: parseFloat(s2),
+        s3: parseFloat(s3),
+        p: parseFloat(((parseFloat(r2) + parseFloat(s2)) / 2).toFixed(3)),
+        status: 'ACTIVE',
+        isValid: true,
+        calculatedAt: new Date()
+      };
+      pivotService.pivotStates.set(targetSymbol, state);
+      pivotService.broadcastPivotState(targetSymbol, state);
+    }
 
     const config = pivotService.getConfig(targetSymbol);
     res.json({ success: true, data: config, pivotState: state });
