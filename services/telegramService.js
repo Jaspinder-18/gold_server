@@ -5,11 +5,17 @@ import { logger } from '../utils/logger.js';
 
 class TelegramService {
   constructor() {
-    this.botToken = process.env.TELEGRAM_BOT_TOKEN || '8843421319:AAF35e2UTsekXzjClYXvppH-8BHpn0EjC8k';
-    this.chatId = process.env.TELEGRAM_CHAT_ID || '-5428923029';
-    this.baseUrl = `https://api.telegram.org/bot${this.botToken}`;
+    this.reloadConfig();
     this.retryQueue = [];
     this.isProcessingQueue = false;
+  }
+
+  reloadConfig() {
+    const rawToken = process.env.TELEGRAM_BOT_TOKEN || '8843421319:AAF35e2UTsekXzjClYXvppH-8BHpn0EjC8k';
+    const rawChatId = process.env.TELEGRAM_CHAT_ID || '-5428923029';
+    this.botToken = (rawToken || '').trim();
+    this.chatId = (rawChatId || '').trim();
+    this.baseUrl = `https://api.telegram.org/bot${this.botToken}`;
   }
 
   formatAlertMessage(alertData) {
@@ -70,11 +76,19 @@ ${dateFormatted} | ${timeFormatted} UTC
         return { success: true, messageId: result?.message_id, message };
       }
     } catch (err) {
+      const statusCode = err.response?.status;
       const errorMsg = err.response?.data?.description || err.message;
-      logger.error(`Telegram alert delivery failed: ${errorMsg}`);
+      
+      if (statusCode === 401) {
+        logger.error(`Telegram Bot Token is UNAUTHORIZED / INVALID (401). Please verify TELEGRAM_BOT_TOKEN in server/.env or botFather.`);
+      } else if (statusCode === 400 || statusCode === 403) {
+        logger.error(`Telegram alert delivery failed (${statusCode}): ${errorMsg}. Please check TELEGRAM_CHAT_ID.`);
+      } else {
+        logger.error(`Telegram alert delivery failed: ${errorMsg}`);
+        // Only queue for automatic retry if network or transient/rate-limit failure
+        this.queueRetry({ alertData, screenshotBufferOrPath, attempts: 1 });
+      }
 
-      // Queue for automatic retry if network or rate-limit failure
-      this.queueRetry({ alertData, screenshotBufferOrPath, attempts: 1 });
       return { success: false, error: errorMsg, message };
     }
   }

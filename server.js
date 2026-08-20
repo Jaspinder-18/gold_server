@@ -131,7 +131,7 @@ const startServer = async () => {
     await connectDB();
 
     // 2. Initialize Pivot Calculation Engine
-    await pivotService.initialize();
+    await pivotService.initialize(io);
 
     // 3. Initialize Alert Service
     await alertService.initialize(io);

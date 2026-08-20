@@ -1,12 +1,20 @@
+import EventEmitter from 'events';
 import { AlertConfiguration } from '../models/AlertConfiguration.js';
 import { logger } from '../utils/logger.js';
 
-class PivotService {
+class PivotService extends EventEmitter {
   constructor() {
+    super();
     this.config = null;
+    this.io = null;
   }
 
-  async initialize() {
+  setSocketServer(io) {
+    this.io = io;
+  }
+
+  async initialize(socketServer = null) {
+    if (socketServer) this.io = socketServer;
     logger.info('Initializing Pivot Calculation Engine (Monitoring R3, R2, S2, S3)...');
     let config = await AlertConfiguration.findOne({ symbol: 'XAUUSD' });
 
@@ -31,19 +39,54 @@ class PivotService {
       });
       logger.info('Created Gold Alert Configuration with exact chart levels in MongoDB.');
     } else {
-      // Pin exact calibrated levels from TradingView chart
-      config.r3 = 4473.76;
-      config.r2 = 4432.84;
-      config.s2 = 4300.45;
-      config.s3 = 4259.54;
+      // Ensure defaults exist without overriding user custom levels if already stored
+      if (!config.r3) config.r3 = 4473.76;
+      if (!config.r2) config.r2 = 4432.84;
+      if (!config.s2) config.s2 = 4300.45;
+      if (!config.s3) config.s3 = 4259.54;
       if (!config.chartRange) config.chartRange = '1D';
       if (!config.barSpacing) config.barSpacing = 22;
-      config.autoCalculatePivot = false;
       await config.save();
     }
 
     this.config = config;
     logger.info(`Pivot Levels Active -> R3: ${this.config.r3}, R2: ${this.config.r2}, S2: ${this.config.s2}, S3: ${this.config.s3}`);
+    return this.config;
+  }
+
+  async updateDailyPivots(high, low, close) {
+    if (!this.config) await this.initialize();
+    
+    const h = parseFloat(high);
+    const l = parseFloat(low);
+    const c = parseFloat(close);
+    const range = h - l;
+    const pivot = (h + l + c) / 3;
+
+    // Fibonacci pivot formula
+    const r3 = parseFloat((pivot + 1.000 * range).toFixed(2));
+    const r2 = parseFloat((pivot + 0.618 * range).toFixed(2));
+    const r1 = parseFloat((pivot + 0.382 * range).toFixed(2));
+    const s1 = parseFloat((pivot - 0.382 * range).toFixed(2));
+    const s2 = parseFloat((pivot - 0.618 * range).toFixed(2));
+    const s3 = parseFloat((pivot - 1.000 * range).toFixed(2));
+
+    this.config.dailyHigh = h;
+    this.config.dailyLow = l;
+    this.config.dailyClose = c;
+    this.config.pivot = parseFloat(pivot.toFixed(2));
+    this.config.r1 = r1;
+    this.config.r2 = r2;
+    this.config.r3 = r3;
+    this.config.s1 = s1;
+    this.config.s2 = s2;
+    this.config.s3 = s3;
+    this.config.lastCalculatedAt = new Date();
+
+    await this.config.save();
+    logger.info(`✨ Calculated new Fibonacci levels: R3: ${r3}, R2: ${r2}, S2: ${s2}, S3: ${s3}`);
+
+    this.broadcastConfigUpdate();
     return this.config;
   }
 
@@ -78,8 +121,18 @@ class PivotService {
 
     this.config.lastCalculatedAt = new Date();
     await this.config.save();
-    logger.info(`Pivot Configuration updated. BarSpacing: ${this.config.barSpacing}, Range: ${this.config.chartRange}, Timeframe: ${this.config.chartTimeframe}`);
+    logger.info(`Pivot Configuration updated -> R3: ${this.config.r3}, R2: ${this.config.r2}, S2: ${this.config.s2}, S3: ${this.config.s3}, BarSpacing: ${this.config.barSpacing}, Range: ${this.config.chartRange}`);
+    
+    this.broadcastConfigUpdate();
     return this.config;
+  }
+
+  broadcastConfigUpdate() {
+    const plainConfig = this.getConfig();
+    this.emit('config_updated', plainConfig);
+    if (this.io) {
+      this.io.emit('config_updated', plainConfig);
+    }
   }
 
   getConfig() {
@@ -100,7 +153,7 @@ class PivotService {
         telegramAlertsEnabled: true
       };
     }
-    return this.config;
+    return typeof this.config.toObject === 'function' ? this.config.toObject() : { ...this.config };
   }
 
   // Calculate live distance metrics for ONLY R3, R2, S2, S3

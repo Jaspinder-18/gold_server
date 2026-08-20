@@ -785,8 +785,12 @@ class ScreenshotService {
       });
     });
 
-    // Auto-fit content so candles start cleanly from today's start date
-    chart.timeScale().fitContent();
+    // Respect dynamicBarSpacing and align viewport to latest candles cleanly
+    chart.timeScale().applyOptions({
+      barSpacing: dynamicBarSpacing,
+      rightOffset: 6
+    });
+    chart.timeScale().scrollToRealTime();
 
     window.addEventListener('resize', () => {
       chart.resize(container.clientWidth, container.clientHeight);
