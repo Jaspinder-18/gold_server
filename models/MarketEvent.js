@@ -63,7 +63,7 @@ const MarketEventSchema = new mongoose.Schema({
   },
   telegramStatus: {
     type: String,
-    enum: ['SENT', 'FAILED', 'PENDING', 'SKIPPED'],
+    enum: ['SENT', 'FAILED', 'PENDING', 'SKIPPED', 'MANUAL_CAPTURE'],
     default: 'PENDING',
     index: true
   },

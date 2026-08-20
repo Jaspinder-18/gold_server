@@ -165,17 +165,18 @@ const startServer = async () => {
     // 6. Initialize Market Data Live Feed
     await marketDataService.initialize();
 
-    // 6. Immediately calculate and activate fresh live Fibonacci levels from current live market
+    // 7. Ensure Active Symbol Pivot State is computed from verified completed OHLC
     try {
-      const initialMarket = marketDataService.getMarketData();
-      if (initialMarket && initialMarket.price) {
-        await pivotService.autoRecalculateFromMarket(initialMarket);
-      }
+      const activeSym = symbolService.getActiveSymbol();
+      await pivotService.getOrCalculatePivotsForSymbol(activeSym, {
+        pivotType: 'FIBONACCI',
+        pivotTimeframe: 'DAILY'
+      });
     } catch (calcErr) {
-      logger.warn(`Startup live pivot calculation error: ${calcErr.message}`);
+      logger.warn(`Startup pivot initialization warning: ${calcErr.message}`);
     }
 
-    // 7. Start HTTP & WebSocket Server
+    // 8. Start HTTP & WebSocket Server
     server.listen(PORT, () => {
       logger.info(`=======================================================`);
       logger.info(`  GOLD (XAU/USD) TRADINGVIEW ALERT ENGINE RUNNING      `);

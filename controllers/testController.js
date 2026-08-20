@@ -58,7 +58,7 @@ export const captureLiveScreenshot = async (req, res) => {
       currentPrice,
       tolerance: config.tolerance || 0.20,
       screenshotPath,
-      telegramStatus: 'MANUAL_CAPTURE',
+      telegramStatus: 'SKIPPED',
       triggerReason: `Manual TradingView screenshot capture (${dynamicTimeframe}m, ${dynamicRange} range, ${dynamicBarSpacing}px barSpacing)`,
       timestamp: new Date(),
       isTest: true
