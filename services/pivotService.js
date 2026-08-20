@@ -54,6 +54,17 @@ class PivotService extends EventEmitter {
     return this.config;
   }
 
+  async autoRecalculateFromMarket(marketData) {
+    if (!marketData || !marketData.price) return this.config;
+    const price = parseFloat(marketData.price);
+    const high = marketData.high24h && marketData.high24h > price ? parseFloat(marketData.high24h) : parseFloat((price + 32.0).toFixed(2));
+    const low = marketData.low24h && marketData.low24h < price ? parseFloat(marketData.low24h) : parseFloat((price - 32.0).toFixed(2));
+    const close = marketData.open ? parseFloat(marketData.open) : price;
+
+    logger.info(`🔄 Auto-calculating Fibonacci levels from market (High: $${high}, Low: $${low}, Close/Price: $${price})...`);
+    return await this.updateDailyPivots(high, low, close);
+  }
+
   async updateDailyPivots(high, low, close) {
     if (!this.config) await this.initialize();
     

@@ -168,8 +168,16 @@ const startServer = async () => {
 // Graceful shutdown
 const gracefulShutdown = async () => {
   logger.info('Shutting down server gracefully...');
-  keepAliveService.stop();
-  await screenshotService.shutdown();
+  try {
+    keepAliveService.stop();
+  } catch (e) {}
+  try {
+    if (screenshotService.shutdown) {
+      await screenshotService.shutdown();
+    } else if (screenshotService.close) {
+      await screenshotService.close();
+    }
+  } catch (e) {}
   server.close(() => {
     logger.info('Server closed.');
     process.exit(0);

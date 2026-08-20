@@ -869,10 +869,16 @@ class ScreenshotService {
     };
   }
 
+  async shutdown() {
+    await this.close();
+  }
+
   async close() {
     if (this.cleanupTimer) clearInterval(this.cleanupTimer);
     if (this.browser) {
-      await this.browser.close();
+      try {
+        await this.browser.close();
+      } catch (e) {}
       this.browser = null;
       this.context = null;
       this.isBrowserReady = false;

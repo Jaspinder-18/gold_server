@@ -1,4 +1,5 @@
 import { pivotService } from '../services/pivotService.js';
+import { marketDataService } from '../services/marketDataService.js';
 
 export const getConfig = async (req, res) => {
   try {
@@ -25,6 +26,16 @@ export const calculatePivots = async (req, res) => {
       return res.status(400).json({ success: false, error: 'High, Low, and Close prices required' });
     }
     const updated = await pivotService.updateDailyPivots(high, low, close);
+    res.json({ success: true, data: updated });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+export const autoCalculatePivots = async (req, res) => {
+  try {
+    const data = marketDataService.getCurrentData();
+    const updated = await pivotService.autoRecalculateFromMarket(data);
     res.json({ success: true, data: updated });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
