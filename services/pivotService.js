@@ -24,7 +24,7 @@ class PivotService extends EventEmitter {
         tradingViewTicker: 'OANDA:XAUUSD',
         customChartUrl: 'https://www.tradingview.com/chart/hRhqMpmT/?symbol=OANDA%3AXAUUSD',
         enabled: true,
-        autoCalculatePivot: false,
+        autoCalculatePivot: true,
         pivotType: 'FIBONACCI',
         r3: 4657.02,
         r2: 4580.75,
@@ -39,13 +39,10 @@ class PivotService extends EventEmitter {
         telegramAlertsEnabled: true,
         lastCalculatedAt: new Date()
       });
-      logger.info('Created Gold Alert Configuration with exact TradingView market levels in MongoDB.');
+      logger.info('Created Gold Alert Configuration in MongoDB with real-time level tracking.');
     } else {
-      // Sync to exact TradingView market chart levels
-      config.r3 = 4657.02;
-      config.r2 = 4580.75;
-      config.s2 = 4333.97;
-      config.s3 = 4257.70;
+      // Ensure real-time auto-calculation is active
+      config.autoCalculatePivot = true;
       config.customChartUrl = 'https://www.tradingview.com/chart/hRhqMpmT/?symbol=OANDA%3AXAUUSD';
       if (!config.chartRange) config.chartRange = '1D';
       if (!config.barSpacing) config.barSpacing = 22;
@@ -53,13 +50,12 @@ class PivotService extends EventEmitter {
     }
 
     this.config = config;
-    logger.info(`Pivot Levels Active -> R3: ${this.config.r3}, R2: ${this.config.r2}, S2: ${this.config.s2}, S3: ${this.config.s3}`);
+    logger.info(`Pivot Levels Active -> R3: ${this.config.r3}, R2: ${this.config.r2}, S2: ${this.config.s2}, S3: ${this.config.s3} (Real-Time Auto-Calculation: ACTIVE)`);
     return this.config;
   }
 
   async autoRecalculateFromMarket(marketData) {
     if (!this.config) await this.initialize();
-    if (!this.config.autoCalculatePivot) return this.config;
     if (!marketData || !marketData.price) return this.config;
     const price = parseFloat(marketData.price);
     const high = marketData.high24h && marketData.high24h > price ? parseFloat(marketData.high24h) : parseFloat((price + 32.0).toFixed(2));
