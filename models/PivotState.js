@@ -12,7 +12,7 @@ const PivotStateSchema = new mongoose.Schema({
     type: String,
     required: true,
     enum: ['TRADITIONAL', 'FIBONACCI', 'CAMARILLA', 'WOODIE', 'CLASSIC'],
-    default: 'TRADITIONAL',
+    default: 'FIBONACCI',
     uppercase: true
   },
   pivotTimeframe: {

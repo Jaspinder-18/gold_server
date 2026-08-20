@@ -139,11 +139,11 @@ class PivotService extends EventEmitter {
 
     // 2. Forex, Commodities, Indices, Stocks: Yahoo Finance / TradingView Scanner Historical
     const tickerMap = {
-      XAUUSD: 'GC=F',
-      XAGUSD: 'SI=F',
+      XAUUSD: 'XAUUSD=X',
+      XAGUSD: 'XAGUSD=X',
       EURUSD: 'EURUSD=X',
       GBPUSD: 'GBPUSD=X',
-      USDJPY: 'JPY=X',
+      USDJPY: 'USDJPY=X',
       NIFTY: '^NSEI',
       BANKNIFTY: '^NSEBANK',
       US30: '^DJI',
@@ -257,68 +257,68 @@ class PivotService extends EventEmitter {
   /**
    * Mathematically calculates pivot levels from completed [High, Low, Close]
    */
-  calculatePivotsFromOHLC({ high, low, close, open = null, pivotType = 'TRADITIONAL', priceDecimals = 2 }) {
+  calculatePivotsFromOHLC({ high, low, close, open = null, pivotType = 'FIBONACCI', priceDecimals = 3 }) {
     const H = parseFloat(high);
     const L = parseFloat(low);
     const C = parseFloat(close);
     const O = open !== null ? parseFloat(open) : C;
-    const range = parseFloat((H - L).toFixed(priceDecimals));
+    const rawRange = H - L;
 
-    let p, r1, r2, r3, s1, s2, s3;
-    const type = (pivotType || 'TRADITIONAL').toUpperCase();
+    let rawP, rawR1, rawR2, rawR3, rawS1, rawS2, rawS3;
+    const type = (pivotType || 'FIBONACCI').toUpperCase();
 
     if (type === 'FIBONACCI') {
       // TradingView Standard Fibonacci Pivot Formula
-      p = parseFloat(((H + L + C) / 3).toFixed(priceDecimals));
-      r1 = parseFloat((p + 0.382 * range).toFixed(priceDecimals));
-      s1 = parseFloat((p - 0.382 * range).toFixed(priceDecimals));
-      r2 = parseFloat((p + 0.618 * range).toFixed(priceDecimals));
-      s2 = parseFloat((p - 0.618 * range).toFixed(priceDecimals));
-      r3 = parseFloat((p + 1.000 * range).toFixed(priceDecimals));
-      s3 = parseFloat((p - 1.000 * range).toFixed(priceDecimals));
+      rawP = (H + L + C) / 3;
+      rawR1 = rawP + 0.382 * rawRange;
+      rawS1 = rawP - 0.382 * rawRange;
+      rawR2 = rawP + 0.618 * rawRange;
+      rawS2 = rawP - 0.618 * rawRange;
+      rawR3 = rawP + 1.000 * rawRange;
+      rawS3 = rawP - 1.000 * rawRange;
     } else if (type === 'CAMARILLA') {
       // Camarilla Pivot Formula
-      p = parseFloat(((H + L + C) / 3).toFixed(priceDecimals));
-      r1 = parseFloat((C + range * 1.1 / 12).toFixed(priceDecimals));
-      s1 = parseFloat((C - range * 1.1 / 12).toFixed(priceDecimals));
-      r2 = parseFloat((C + range * 1.1 / 6).toFixed(priceDecimals));
-      s2 = parseFloat((C - range * 1.1 / 6).toFixed(priceDecimals));
-      r3 = parseFloat((C + range * 1.1 / 4).toFixed(priceDecimals));
-      s3 = parseFloat((C - range * 1.1 / 4).toFixed(priceDecimals));
+      rawP = (H + L + C) / 3;
+      rawR1 = C + rawRange * 1.1 / 12;
+      rawS1 = C - rawRange * 1.1 / 12;
+      rawR2 = C + rawRange * 1.1 / 6;
+      rawS2 = C - rawRange * 1.1 / 6;
+      rawR3 = C + rawRange * 1.1 / 4;
+      rawS3 = C - rawRange * 1.1 / 4;
     } else if (type === 'WOODIE') {
-      // Woodie Pivot Formula (Gives more weight to previous Close/Open)
-      p = parseFloat(((H + L + 2 * C) / 4).toFixed(priceDecimals));
-      r1 = parseFloat((2 * p - L).toFixed(priceDecimals));
-      s1 = parseFloat((2 * p - H).toFixed(priceDecimals));
-      r2 = parseFloat((p + range).toFixed(priceDecimals));
-      s2 = parseFloat((p - range).toFixed(priceDecimals));
-      r3 = parseFloat((H + 2 * (p - L)).toFixed(priceDecimals));
-      s3 = parseFloat((L - 2 * (H - p)).toFixed(priceDecimals));
+      // Woodie Pivot Formula
+      rawP = (H + L + 2 * C) / 4;
+      rawR1 = 2 * rawP - L;
+      rawS1 = 2 * rawP - H;
+      rawR2 = rawP + rawRange;
+      rawS2 = rawP - rawRange;
+      rawR3 = H + 2 * (rawP - L);
+      rawS3 = L - 2 * (H - rawP);
     } else {
       // TRADITIONAL / CLASSIC (Standard Floor Pivot Methodology)
-      p = parseFloat(((H + L + C) / 3).toFixed(priceDecimals));
-      r1 = parseFloat((2 * p - L).toFixed(priceDecimals));
-      s1 = parseFloat((2 * p - H).toFixed(priceDecimals));
-      r2 = parseFloat((p + (H - L)).toFixed(priceDecimals));
-      s2 = parseFloat((p - (H - L)).toFixed(priceDecimals));
-      r3 = parseFloat((H + 2 * (p - L)).toFixed(priceDecimals));
-      s3 = parseFloat((L - 2 * (H - p)).toFixed(priceDecimals));
+      rawP = (H + L + C) / 3;
+      rawR1 = 2 * rawP - L;
+      rawS1 = 2 * rawP - H;
+      rawR2 = rawP + rawRange;
+      rawS2 = rawP - rawRange;
+      rawR3 = H + 2 * (rawP - L);
+      rawS3 = L - 2 * (H - rawP);
     }
 
     return {
       pivotType: type,
-      high: H,
-      low: L,
-      close: C,
-      open: O,
-      range,
-      p,
-      r1,
-      r2,
-      r3,
-      s1,
-      s2,
-      s3
+      high: parseFloat(H.toFixed(priceDecimals)),
+      low: parseFloat(L.toFixed(priceDecimals)),
+      close: parseFloat(C.toFixed(priceDecimals)),
+      open: parseFloat(O.toFixed(priceDecimals)),
+      range: parseFloat(rawRange.toFixed(priceDecimals)),
+      p: parseFloat(rawP.toFixed(priceDecimals)),
+      r1: parseFloat(rawR1.toFixed(priceDecimals)),
+      r2: parseFloat(rawR2.toFixed(priceDecimals)),
+      r3: parseFloat(rawR3.toFixed(priceDecimals)),
+      s1: parseFloat(rawS1.toFixed(priceDecimals)),
+      s2: parseFloat(rawS2.toFixed(priceDecimals)),
+      s3: parseFloat(rawS3.toFixed(priceDecimals))
     };
   }
 

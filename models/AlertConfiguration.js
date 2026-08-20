@@ -39,7 +39,7 @@ const AlertConfigurationSchema = new mongoose.Schema({
   pivotType: {
     type: String,
     enum: ['TRADITIONAL', 'FIBONACCI', 'CAMARILLA', 'WOODIE', 'CLASSIC'],
-    default: 'TRADITIONAL'
+    default: 'FIBONACCI'
   },
   pivotTimeframe: {
     type: String,

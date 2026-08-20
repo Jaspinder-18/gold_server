@@ -14,7 +14,7 @@ export const DEFAULT_SYMBOLS = [
     provider: 'TradingView Real-Time (OANDA)',
     timezone: 'America/New_York',
     sessionCloseUtc: '22:00', // 17:00 NY
-    priceDecimals: 2,
+    priceDecimals: 3,
     tolerance: 0.20,
     retriggerDistance: 1.00,
     isDefault: true
