@@ -16,40 +16,64 @@ class PivotService extends EventEmitter {
   async initialize(socketServer = null) {
     if (socketServer) this.io = socketServer;
     logger.info('Initializing Pivot Calculation Engine (Monitoring R3, R2, S2, S3)...');
-    let config = await AlertConfiguration.findOne({ symbol: 'XAUUSD' });
+    try {
+      let config = await AlertConfiguration.findOne({ symbol: 'XAUUSD' });
 
-    if (!config) {
-      config = await AlertConfiguration.create({
-        symbol: 'XAUUSD',
-        tradingViewTicker: 'OANDA:XAUUSD',
-        customChartUrl: 'https://www.tradingview.com/chart/hRhqMpmT/?symbol=OANDA%3AXAUUSD',
-        enabled: true,
-        autoCalculatePivot: true,
-        pivotType: 'FIBONACCI',
-        r3: 4657.02,
-        r2: 4580.75,
-        s2: 4333.97,
-        s3: 4257.70,
-        tolerance: parseFloat(process.env.LEVEL_TOUCH_TOLERANCE || '0.20'),
-        retriggerDistance: parseFloat(process.env.RETRIGGER_DISTANCE || '1.00'),
-        monitoredLevels: ['R3', 'R2', 'S2', 'S3'],
-        chartTimeframe: '15',
-        chartRange: '1D',
-        barSpacing: 22,
-        telegramAlertsEnabled: true,
-        lastCalculatedAt: new Date()
-      });
-      logger.info('Created Gold Alert Configuration in MongoDB with real-time level tracking.');
-    } else {
-      // Ensure real-time auto-calculation is active
-      config.autoCalculatePivot = true;
-      config.customChartUrl = 'https://www.tradingview.com/chart/hRhqMpmT/?symbol=OANDA%3AXAUUSD';
-      if (!config.chartRange) config.chartRange = '1D';
-      if (!config.barSpacing) config.barSpacing = 22;
-      await config.save();
+      if (!config) {
+        config = await AlertConfiguration.create({
+          symbol: 'XAUUSD',
+          tradingViewTicker: 'OANDA:XAUUSD',
+          customChartUrl: 'https://www.tradingview.com/chart/hRhqMpmT/?symbol=OANDA%3AXAUUSD',
+          enabled: true,
+          autoCalculatePivot: true,
+          pivotType: 'FIBONACCI',
+          r3: 4545.20,
+          r2: 4527.71,
+          s2: 4471.13,
+          s3: 4453.64,
+          tolerance: parseFloat(process.env.LEVEL_TOUCH_TOLERANCE || '0.20'),
+          retriggerDistance: parseFloat(process.env.RETRIGGER_DISTANCE || '1.00'),
+          monitoredLevels: ['R3', 'R2', 'S2', 'S3'],
+          chartTimeframe: '15',
+          chartRange: '1D',
+          barSpacing: 22,
+          telegramAlertsEnabled: true,
+          lastCalculatedAt: new Date()
+        });
+        logger.info('Created Gold Alert Configuration in MongoDB with real-time level tracking.');
+      } else {
+        config.autoCalculatePivot = true;
+        if (!config.chartRange) config.chartRange = '1D';
+        if (!config.barSpacing) config.barSpacing = 22;
+        await config.save();
+      }
+
+      this.config = config;
+    } catch (err) {
+      logger.warn(`Database config load deferred: ${err.message}. Using in-memory configuration.`);
+      if (!this.config) {
+        this.config = {
+          symbol: 'XAUUSD',
+          tradingViewTicker: 'OANDA:XAUUSD',
+          enabled: true,
+          autoCalculatePivot: true,
+          pivotType: 'FIBONACCI',
+          r3: 4545.20,
+          r2: 4527.71,
+          s2: 4471.13,
+          s3: 4453.64,
+          tolerance: 0.20,
+          retriggerDistance: 1.00,
+          monitoredLevels: ['R3', 'R2', 'S2', 'S3'],
+          chartTimeframe: '15',
+          chartRange: '1D',
+          barSpacing: 22,
+          telegramAlertsEnabled: true,
+          save: async () => {}
+        };
+      }
     }
 
-    this.config = config;
     logger.info(`Pivot Levels Active -> R3: ${this.config.r3}, R2: ${this.config.r2}, S2: ${this.config.s2}, S3: ${this.config.s3} (Real-Time Auto-Calculation: ACTIVE)`);
     return this.config;
   }
@@ -71,10 +95,10 @@ class PivotService extends EventEmitter {
     const h = parseFloat(high);
     const l = parseFloat(low);
     const c = parseFloat(close);
-    const range = h - l;
-    const pivot = (h + l + c) / 3;
+    const range = parseFloat((h - l).toFixed(2));
+    const pivot = parseFloat(((h + l + c) / 3).toFixed(2));
 
-    // Fibonacci pivot formula
+    // Fibonacci pivot formula (TradingView Standard Formula)
     const r3 = parseFloat((pivot + 1.000 * range).toFixed(2));
     const r2 = parseFloat((pivot + 0.618 * range).toFixed(2));
     const r1 = parseFloat((pivot + 0.382 * range).toFixed(2));
@@ -95,7 +119,7 @@ class PivotService extends EventEmitter {
     this.config.dailyHigh = h;
     this.config.dailyLow = l;
     this.config.dailyClose = c;
-    this.config.pivot = parseFloat(pivot.toFixed(2));
+    this.config.pivot = pivot;
     this.config.r1 = r1;
     this.config.r2 = r2;
     this.config.r3 = r3;
@@ -104,8 +128,15 @@ class PivotService extends EventEmitter {
     this.config.s3 = s3;
     this.config.lastCalculatedAt = new Date();
 
-    await this.config.save();
-    logger.info(`✨ Synchronized live Fibonacci levels from market (High: \$${h}, Low: \$${l}, Close/Price: \$${c}) -> R3: \$${r3}, R2: \$${r2}, S2: \$${s2}, S3: \$${s3}`);
+    try {
+      if (typeof this.config.save === 'function') {
+        await this.config.save();
+      }
+    } catch (saveErr) {
+      logger.warn(`Could not save config to DB: ${saveErr.message}`);
+    }
+
+    logger.info(`✨ Synchronized live Fibonacci levels: R3: \$${r3}, R2: \$${r2}, S2: \$${s2}, S3: \$${s3} (Session High: \$${h}, Low: \$${l}, Close/Price: \$${c})`);
 
     this.broadcastConfigUpdate();
     return this.config;
