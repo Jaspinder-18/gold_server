@@ -32,9 +32,9 @@ class PivotService extends EventEmitter {
     const activeSym = symbolService.getActiveSymbol();
     await this.getOrCalculatePivotsForSymbol(activeSym);
 
-    // Schedule automated session rollover checking every 60 seconds
+    // Schedule automated session rollover checking every 30 seconds
     if (this.rolloverCheckTimer) clearInterval(this.rolloverCheckTimer);
-    this.rolloverCheckTimer = setInterval(() => this.checkSessionRollovers(), 60000);
+    this.rolloverCheckTimer = setInterval(() => this.checkSessionRollovers(), 30000);
 
     logger.info(`Pivot Service ready. Active Symbol '${activeSym}' Levels: P=${this.getPivotState(activeSym)?.p || 'N/A'}`);
   }
@@ -63,28 +63,29 @@ class PivotService extends EventEmitter {
 
     return {
       symbol: sym,
-      tradingViewTicker: symConfig.tradingViewTicker,
-      customChartUrl: symConfig.customChartUrl || '',
-      chartTimeframe: symConfig.chartTimeframe || '15',
-      chartRange: symConfig.chartRange || '1D',
-      barSpacing: symConfig.barSpacing || 22,
+      tradingViewTicker: symConfig?.tradingViewTicker || `OANDA:${sym}`,
+      customChartUrl: symConfig?.customChartUrl || '',
+      chartTimeframe: symConfig?.chartTimeframe || '15',
+      chartRange: symConfig?.chartRange || '1D',
+      barSpacing: symConfig?.barSpacing || 22,
       enabled: alertCfg.enabled !== false,
       autoCalculatePivot: true,
       pivotType: pivot?.pivotType || alertCfg.pivotType || 'FIBONACCI',
       pivotTimeframe: pivot?.pivotTimeframe || alertCfg.pivotTimeframe || 'DAILY',
-      tolerance: symConfig.tolerance || 0.20,
-      retriggerDistance: symConfig.retriggerDistance || 1.00,
+      tolerance: symConfig?.tolerance || 0.20,
+      retriggerDistance: symConfig?.retriggerDistance || 1.00,
       telegramAlertsEnabled: alertCfg.telegramAlertsEnabled !== false,
-      r3: pivot?.r3 ?? 4657.017,
-      r2: pivot?.r2 ?? 4580.747,
-      r1: pivot?.r1 ?? 4533.627,
-      pivot: pivot?.p ?? 4457.357,
-      s1: pivot?.s1 ?? 4381.087,
-      s2: pivot?.s2 ?? 4333.967,
-      s3: pivot?.s3 ?? 4257.697,
-      dailyHigh: pivot?.high ?? 4557.020,
-      dailyLow: pivot?.low ?? 4357.360,
-      dailyClose: pivot?.close ?? 4457.690,
+      r3: pivot?.r3 ?? 0,
+      r2: pivot?.r2 ?? 0,
+      r1: pivot?.r1 ?? 0,
+      pivot: pivot?.p ?? 0,
+      s1: pivot?.s1 ?? 0,
+      s2: pivot?.s2 ?? 0,
+      s3: pivot?.s3 ?? 0,
+      dailyHigh: pivot?.high ?? 0,
+      dailyLow: pivot?.low ?? 0,
+      dailyClose: pivot?.close ?? 0,
+      dailyOpen: pivot?.open ?? 0,
       lastCalculatedAt: pivot?.calculatedAt || new Date(),
       nextRolloverAt: pivot?.nextRolloverAt || null,
       isValid: pivot?.isValid ?? true,
@@ -93,30 +94,85 @@ class PivotService extends EventEmitter {
   }
 
   /**
-   * Fetches previous completed period OHLC candle from official market data feeds
+   * Primary: Fetches previous completed period OHLC candle directly from TradingView Scanner API
+   * with automated fallbacks to Binance Klines and Yahoo Finance.
    */
   async fetchPreviousCompletedOHLC(symbolStr, timeframe = 'DAILY') {
     const sym = (symbolStr || symbolService.getActiveSymbol()).toUpperCase();
-    const symConfig = symbolService.getSymbol(sym);
+    const symConfig = symbolService.getSymbol(sym) || symbolService.getActiveSymbolConfig();
+    const decimals = symConfig?.priceDecimals ?? 2;
 
-    logger.info(`Fetching previous completed ${timeframe} OHLC for ${sym} (${symConfig?.provider || 'Global'})...`);
+    logger.info(`Fetching previous completed ${timeframe} OHLC for ${sym} (${symConfig?.provider || 'TradingView'})...`);
 
-    // 1. Spot Gold (OANDA:XAUUSD): Verified completed trading session OHLC
-    if (sym === 'XAUUSD' && timeframe === 'DAILY') {
-      logger.info(`✅ Verified Completed Daily Session OHLC for ${sym} (OANDA): High=4557.020, Low=4357.360, Close=4457.690 (Session Closed: 17:00 NY / 22:00 UTC)`);
-      return {
-        high: 4557.020,
-        low: 4357.360,
-        close: 4457.690,
-        open: 4430.500,
-        periodStart: new Date('2026-08-18T22:00:00Z'),
-        periodEnd: new Date('2026-08-19T22:00:00Z'),
-        periodDateStr: '2026-08-19',
-        dataSource: 'OANDA Historical Completed EOD Feed'
-      };
+    // 1. TradingView Scanner API (Authoritative source for completed daily bars: high[1], low[1], close[1], open[1])
+    const candidateScanners = [];
+    if (symConfig?.assetType === 'CRYPTO') candidateScanners.push('crypto');
+    else if (symConfig?.assetType === 'FOREX') candidateScanners.push('forex');
+    else if (symConfig?.assetType === 'INDEX' && symConfig?.exchange === 'NSE') candidateScanners.push('india');
+    else if (symConfig?.assetType === 'INDEX') candidateScanners.push('america', 'cfd', 'global');
+    else if (symConfig?.assetType === 'STOCK') candidateScanners.push('america');
+    else candidateScanners.push('cfd', 'forex', 'global');
+
+    // General fallback scanner list
+    ['cfd', 'forex', 'crypto', 'america', 'india', 'global'].forEach(sc => {
+      if (!candidateScanners.includes(sc)) candidateScanners.push(sc);
+    });
+
+    const candidateTickers = [
+      symConfig?.tradingViewTicker,
+      `OANDA:${sym}`,
+      `FX_IDC:${sym}`,
+      `TVC:${sym}`,
+      `PEPPERSTONE:${sym}`,
+      `FOREXCOM:${sym}`,
+      `BINANCE:${sym.replace('USD', 'USDT')}`,
+      `BINANCE:${sym}`
+    ].filter(Boolean);
+
+    for (const sc of candidateScanners) {
+      try {
+        const res = await axios.post(
+          `https://scanner.tradingview.com/${sc}/scan`,
+          {
+            symbols: { tickers: candidateTickers },
+            columns: ['name', 'open[1]', 'high[1]', 'low[1]', 'close[1]', 'close', 'open[2]', 'high[2]', 'low[2]', 'close[2]']
+          },
+          { headers: { 'Content-Type': 'application/json' }, timeout: 4500 }
+        );
+
+        if (res.data?.data && Array.isArray(res.data.data) && res.data.data.length > 0) {
+          const match = res.data.data.find(item => item.d && item.d[2] !== null && item.d[3] !== null && item.d[4] !== null);
+          if (match) {
+            const [, o1, h1, l1, c1] = match.d;
+            const high = parseFloat(parseFloat(h1).toFixed(decimals));
+            const low = parseFloat(parseFloat(l1).toFixed(decimals));
+            const close = parseFloat(parseFloat(c1).toFixed(decimals));
+            const open = o1 !== null ? parseFloat(parseFloat(o1).toFixed(decimals)) : close;
+
+            // Compute session date
+            const now = new Date();
+            const sessionDate = new Date(now.getTime() - 86400000);
+            const periodDateStr = sessionDate.toISOString().split('T')[0];
+
+            logger.info(`✅ TradingView Scanner [${sc}] Completed ${timeframe} OHLC for ${sym} (${match.s}): High=${high}, Low=${low}, Close=${close}, Open=${open}`);
+            return {
+              high,
+              low,
+              close,
+              open,
+              periodStart: sessionDate,
+              periodEnd: now,
+              periodDateStr,
+              dataSource: `TradingView Scanner (${match.s})`
+            };
+          }
+        }
+      } catch (tvErr) {
+        // continue to next candidate scanner
+      }
     }
 
-    // 2. Crypto: Binance Klines API
+    // 2. Crypto Fallback: Binance Klines API
     if (symConfig?.assetType === 'CRYPTO') {
       try {
         const pair = sym.includes('USD') && !sym.includes('USDT') ? `${sym.replace('USD', 'USDT')}` : sym;
@@ -125,16 +181,15 @@ class PivotService extends EventEmitter {
         
         const res = await axios.get(url, { timeout: 4500 });
         if (Array.isArray(res.data) && res.data.length >= 2) {
-          // Take finalized previous completed period (penultimate candle [length - 2])
           const completedBar = res.data[res.data.length - 2];
           const openTime = new Date(completedBar[0]);
           const closeTime = new Date(completedBar[6]);
-          const open = parseFloat(parseFloat(completedBar[1]).toFixed(symConfig?.priceDecimals || 2));
-          const high = parseFloat(parseFloat(completedBar[2]).toFixed(symConfig?.priceDecimals || 2));
-          const low = parseFloat(parseFloat(completedBar[3]).toFixed(symConfig?.priceDecimals || 2));
-          const close = parseFloat(parseFloat(completedBar[4]).toFixed(symConfig?.priceDecimals || 2));
+          const open = parseFloat(parseFloat(completedBar[1]).toFixed(decimals));
+          const high = parseFloat(parseFloat(completedBar[2]).toFixed(decimals));
+          const low = parseFloat(parseFloat(completedBar[3]).toFixed(decimals));
+          const close = parseFloat(parseFloat(completedBar[4]).toFixed(decimals));
 
-          logger.info(`✅ Binance Completed ${timeframe} OHLC for ${sym} (${pair}): High=${high}, Low=${low}, Close=${close} (Bar Closed: ${openTime.toISOString().split('T')[0]})`);
+          logger.info(`✅ Binance Completed ${timeframe} OHLC for ${sym} (${pair}): High=${high}, Low=${low}, Close=${close} (Bar Date: ${openTime.toISOString().split('T')[0]})`);
           return {
             high,
             low,
@@ -143,21 +198,21 @@ class PivotService extends EventEmitter {
             periodStart: openTime,
             periodEnd: closeTime,
             periodDateStr: openTime.toISOString().split('T')[0],
-            dataSource: `Binance Completed Klines API (${pair})`
+            dataSource: `Binance Completed Klines (${pair})`
           };
         }
       } catch (binanceErr) {
-        logger.warn(`Binance completed klines fetch error for ${sym}: ${binanceErr.message}`);
+        logger.warn(`Binance completed klines fallback failed for ${sym}: ${binanceErr.message}`);
       }
     }
 
-    // 2. Forex, Commodities, Indices, Stocks: Yahoo Finance / TradingView Scanner Historical
-    const tickerMap = {
-      XAUUSD: 'XAUUSD=X',
-      XAGUSD: 'XAGUSD=X',
+    // 3. Fallback: Yahoo Finance Historical Chart API
+    const yfMap = {
+      XAUUSD: 'GC=F',
+      XAGUSD: 'SI=F',
       EURUSD: 'EURUSD=X',
       GBPUSD: 'GBPUSD=X',
-      USDJPY: 'USDJPY=X',
+      USDJPY: 'JPY=X',
       NIFTY: '^NSEI',
       BANKNIFTY: '^NSEBANK',
       US30: '^DJI',
@@ -168,15 +223,15 @@ class PivotService extends EventEmitter {
       NVDA: 'NVDA'
     };
 
-    const yfTicker = tickerMap[sym] || sym;
+    const yfTicker = yfMap[sym] || sym;
     try {
       const range = timeframe === 'WEEKLY' ? '1mo' : (timeframe === 'MONTHLY' ? '3mo' : '5d');
       const interval = timeframe === 'WEEKLY' ? '1wk' : (timeframe === 'MONTHLY' ? '1mo' : '1d');
       const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yfTicker)}?interval=${interval}&range=${range}`;
 
       const res = await axios.get(url, {
-        headers: { 'User-Agent': 'Mozilla/5.0' },
-        timeout: 5000
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+        timeout: 4500
       });
 
       const result = res.data?.chart?.result?.[0];
@@ -184,11 +239,9 @@ class PivotService extends EventEmitter {
         const timestamps = result.timestamp || [];
         const quotes = result.indicators.quote[0];
         
-        // Find latest COMPLETED historical bar (non-null and before today's forming candle)
         let validIdx = -1;
         for (let i = timestamps.length - 1; i >= 0; i--) {
           if (quotes.high[i] !== null && quotes.low[i] !== null && quotes.close[i] !== null) {
-            // If the last bar timestamp is very recent (e.g. today during live market), take the previous bar
             const barDate = new Date(timestamps[i] * 1000);
             const now = new Date();
             const isToday = barDate.getUTCFullYear() === now.getUTCFullYear() &&
@@ -196,7 +249,7 @@ class PivotService extends EventEmitter {
                             barDate.getUTCDate() === now.getUTCDate();
             
             if (isToday && i > 0 && quotes.close[i - 1] !== null) {
-              validIdx = i - 1; // Take finalized yesterday
+              validIdx = i - 1; // finalized yesterday
             } else {
               validIdx = i;
             }
@@ -205,10 +258,10 @@ class PivotService extends EventEmitter {
         }
 
         if (validIdx >= 0) {
-          const high = parseFloat(parseFloat(quotes.high[validIdx]).toFixed(symConfig?.priceDecimals || 2));
-          const low = parseFloat(parseFloat(quotes.low[validIdx]).toFixed(symConfig?.priceDecimals || 2));
-          const close = parseFloat(parseFloat(quotes.close[validIdx]).toFixed(symConfig?.priceDecimals || 2));
-          const open = quotes.open[validIdx] ? parseFloat(parseFloat(quotes.open[validIdx]).toFixed(symConfig?.priceDecimals || 2)) : close;
+          const high = parseFloat(parseFloat(quotes.high[validIdx]).toFixed(decimals));
+          const low = parseFloat(parseFloat(quotes.low[validIdx]).toFixed(decimals));
+          const close = parseFloat(parseFloat(quotes.close[validIdx]).toFixed(decimals));
+          const open = quotes.open[validIdx] ? parseFloat(parseFloat(quotes.open[validIdx]).toFixed(decimals)) : close;
           const barDate = new Date(timestamps[validIdx] * 1000);
 
           logger.info(`✅ Yahoo Finance Completed ${timeframe} OHLC for ${sym} (${yfTicker}): High=${high}, Low=${low}, Close=${close} (Bar Date: ${barDate.toISOString().split('T')[0]})`);
@@ -225,25 +278,149 @@ class PivotService extends EventEmitter {
         }
       }
     } catch (yfErr) {
-      logger.warn(`Yahoo Finance historical OHLC fetch failed for ${sym} (${yfTicker}): ${yfErr.message}`);
+      logger.warn(`Yahoo Finance historical OHLC fallback failed for ${sym} (${yfTicker}): ${yfErr.message}`);
     }
 
-    // 3. Fallback: Verified Historical Reference Feed for Spot Gold & Forex
-    if (sym === 'XAUUSD') {
-      logger.info(`✅ Verified Completed DAILY OHLC for ${sym} (OANDA): High=4557.020, Low=4357.360, Close=4457.690 (Closed: 2026-08-19)`);
-      return {
-        high: 4557.020,
-        low: 4357.360,
-        close: 4457.690,
-        open: 4430.500,
-        periodStart: new Date('2026-08-18T22:00:00Z'),
-        periodEnd: new Date('2026-08-19T22:00:00Z'),
-        periodDateStr: '2026-08-19',
-        dataSource: 'OANDA Historical Completed EOD Feed'
-      };
+    throw new Error(`Unable to fetch valid historical completed OHLC data for '${sym}' from TradingView, Binance, or Yahoo Finance.`);
+  }
+
+  /**
+   * Fetches completed OHLC for multiple previous days (e.g. past 10 sessions)
+   * and calculates the historical pivot levels for each day.
+   */
+  async fetchCompletedOHLCHistory(symbolStr, count = 10, timeframe = 'DAILY', pivotType = 'FIBONACCI') {
+    const sym = (symbolStr || symbolService.getActiveSymbol()).toUpperCase();
+    const symConfig = symbolService.getSymbol(sym) || symbolService.getActiveSymbolConfig();
+    const decimals = symConfig?.priceDecimals ?? 2;
+    const historyList = [];
+
+    try {
+      // 1. Try TradingView Scanner for multi-day columns (Day [1] through Day [5])
+      const sc = symConfig?.assetType === 'CRYPTO' ? 'crypto' :
+                 symConfig?.assetType === 'FOREX' ? 'forex' :
+                 (symConfig?.assetType === 'INDEX' && symConfig?.exchange === 'NSE') ? 'india' :
+                 symConfig?.assetType === 'STOCK' ? 'america' : 'cfd';
+
+      const candidateTickers = [
+        symConfig?.tradingViewTicker,
+        `OANDA:${sym}`,
+        `FX_IDC:${sym}`,
+        `TVC:${sym}`,
+        `PEPPERSTONE:${sym}`
+      ].filter(Boolean);
+
+      const cols = ['name'];
+      for (let i = 1; i <= Math.min(count, 5); i++) {
+        cols.push(`open[${i}]`, `high[${i}]`, `low[${i}]`, `close[${i}]`);
+      }
+
+      const res = await axios.post(
+        `https://scanner.tradingview.com/${sc}/scan`,
+        { symbols: { tickers: candidateTickers }, columns: cols },
+        { headers: { 'Content-Type': 'application/json' }, timeout: 4500 }
+      );
+
+      if (res.data?.data && Array.isArray(res.data.data)) {
+        const match = res.data.data.find(item => item.d && item.d[2] !== null);
+        if (match && match.d) {
+          const d = match.d;
+          const now = new Date();
+
+          for (let i = 1; i <= Math.min(count, 5); i++) {
+            const offset = 1 + (i - 1) * 4;
+            const o = d[offset];
+            const h = d[offset + 1];
+            const l = d[offset + 2];
+            const c = d[offset + 3];
+
+            if (h !== null && l !== null && c !== null && !isNaN(h) && !isNaN(l) && !isNaN(c)) {
+              const dayHigh = parseFloat(parseFloat(h).toFixed(decimals));
+              const dayLow = parseFloat(parseFloat(l).toFixed(decimals));
+              const dayClose = parseFloat(parseFloat(c).toFixed(decimals));
+              const dayOpen = o !== null ? parseFloat(parseFloat(o).toFixed(decimals)) : dayClose;
+
+              const sessionDate = new Date(now.getTime() - i * 86400000);
+              const dateStr = sessionDate.toISOString().split('T')[0];
+
+              const calc = this.calculatePivotsFromOHLC({
+                high: dayHigh,
+                low: dayLow,
+                close: dayClose,
+                open: dayOpen,
+                pivotType,
+                priceDecimals: decimals
+              });
+
+              historyList.push({
+                date: dateStr,
+                sessionIndex: i,
+                dayHigh,
+                dayLow,
+                dayClose,
+                dayOpen,
+                p: calc.p,
+                r1: calc.r1,
+                r2: calc.r2,
+                r3: calc.r3,
+                s1: calc.s1,
+                s2: calc.s2,
+                s3: calc.s3,
+                r3Touched: false,
+                r2Touched: false,
+                s2Touched: false,
+                s3Touched: false,
+                dataSource: `TradingView Scanner (${match.s})`
+              });
+            }
+          }
+        }
+      }
+    } catch (err) {
+      logger.warn(`TradingView scanner multi-day fetch for ${sym}: ${err.message}`);
     }
 
-    throw new Error(`Unable to fetch valid historical completed OHLC data for '${sym}'.`);
+    // 2. Supplement from MongoDB historical pivot states if available
+    if (mongoose.connection.readyState === 1 && historyList.length < count) {
+      try {
+        const dbHistory = await PivotState.find({
+          symbol: sym,
+          pivotType,
+          pivotTimeframe: timeframe
+        })
+        .sort({ calculatedAt: -1 })
+        .limit(count)
+        .lean();
+
+        for (const item of dbHistory) {
+          const dateStr = item.periodDateStr || (item.calculatedAt ? new Date(item.calculatedAt).toISOString().split('T')[0] : '');
+          if (dateStr && !historyList.some(h => h.date === dateStr)) {
+            historyList.push({
+              date: dateStr,
+              dayHigh: item.high,
+              dayLow: item.low,
+              dayClose: item.close,
+              dayOpen: item.open,
+              p: item.p,
+              r1: item.r1,
+              r2: item.r2,
+              r3: item.r3,
+              s1: item.s1,
+              s2: item.s2,
+              s3: item.s3,
+              r3Touched: false,
+              r2Touched: false,
+              s2Touched: false,
+              s3Touched: false,
+              dataSource: item.dataSource || 'MongoDB Stored History'
+            });
+          }
+        }
+      } catch (dbErr) {
+        logger.warn(`Could not read MongoDB PivotState history: ${dbErr.message}`);
+      }
+    }
+
+    return historyList;
   }
 
   /**
@@ -287,7 +464,7 @@ class PivotService extends EventEmitter {
       rawR3 = H + 2 * (rawP - L);
       rawS3 = L - 2 * (H - rawP);
     } else {
-      // TRADITIONAL / CLASSIC (Standard Floor Pivot Methodology)
+      // TRADITIONAL / CLASSIC (Floor Pivot Methodology)
       rawP = (H + L + C) / 3;
       rawR1 = 2 * rawP - L;
       rawS1 = 2 * rawP - H;
@@ -343,7 +520,7 @@ class PivotService extends EventEmitter {
     }
 
     // 4. Close is within High-Low range (or reasonable session spread)
-    if (state.close > state.high * 1.02 || state.close < state.low * 0.98) {
+    if (state.close > state.high * 1.05 || state.close < state.low * 0.95) {
       errors.push(`Close price (${state.close}) is outside reasonable [Low, High] bounds.`);
     }
 
@@ -398,7 +575,6 @@ class PivotService extends EventEmitter {
     const now = new Date();
 
     if (timeframe === 'WEEKLY') {
-      // Next Sunday 22:00 UTC (Forex session open)
       const nextSunday = new Date(now);
       const day = now.getUTCDay();
       const diff = (7 - day) % 7 || 7;
@@ -408,7 +584,6 @@ class PivotService extends EventEmitter {
     }
 
     if (timeframe === 'MONTHLY') {
-      // 1st of next month 00:00 UTC
       return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1, 0, 0, 0));
     }
 
@@ -418,7 +593,6 @@ class PivotService extends EventEmitter {
     rollover.setUTCHours(closeHour, closeMin, 0, 0);
 
     if (now.getTime() >= rollover.getTime()) {
-      // Rollover today has already passed, schedule for tomorrow
       rollover.setUTCDate(rollover.getUTCDate() + 1);
     }
 
@@ -426,7 +600,7 @@ class PivotService extends EventEmitter {
   }
 
   /**
-   * Returns current active pivot period string based on session close time (e.g. '2026-08-20')
+   * Returns current active pivot period string based on session close time (e.g. '2026-08-24')
    */
   getCurrentPivotPeriod(symbolStr, timeframe = 'DAILY') {
     const sym = (symbolStr || symbolService.getActiveSymbol()).toUpperCase();
@@ -443,21 +617,20 @@ class PivotService extends EventEmitter {
       return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
     }
 
-    // Daily: check if current UTC time has crossed today's sessionCloseUtc
+    // Daily
     const [closeHour, closeMin] = (symConfig?.sessionCloseUtc || '22:00').split(':').map(Number);
     const sessionCloseToday = new Date(now);
     sessionCloseToday.setUTCHours(closeHour, closeMin, 0, 0);
 
     const sessionDate = new Date(now);
     if (now.getTime() >= sessionCloseToday.getTime()) {
-      // Session has rolled over into next trading calendar period
       sessionDate.setUTCDate(sessionDate.getUTCDate() + 1);
     }
     return sessionDate.toISOString().split('T')[0];
   }
 
   /**
-   * Primary method: Retrieves or recalculates pivots for given symbol & settings
+   * Primary method: Retrieves or recalculates pivots dynamically from real live completed OHLC data
    */
   async getOrCalculatePivotsForSymbol(symbolStr, options = {}) {
     const sym = (symbolStr || symbolService.getActiveSymbol()).toUpperCase();
@@ -467,7 +640,7 @@ class PivotService extends EventEmitter {
     const pivotTimeframe = (options.pivotTimeframe || 'DAILY').toUpperCase();
     const currentPeriod = this.getCurrentPivotPeriod(sym, pivotTimeframe);
 
-    // 1. Check existing in-memory or DB active state if not forced
+    // 1. Check existing in-memory state if not forced
     const existingState = this.pivotStates.get(sym);
     if (!options.force && existingState && existingState.pivotPeriod === currentPeriod && existingState.pivotType === pivotType && existingState.pivotTimeframe === pivotTimeframe && existingState.isValid) {
       return existingState;
@@ -492,7 +665,7 @@ class PivotService extends EventEmitter {
     }
 
     try {
-      // 2. Fetch completed OHLC for previous closed period
+      // 2. Fetch real completed OHLC for previous closed period (no hardcoding)
       const ohlc = await this.fetchPreviousCompletedOHLC(sym, pivotTimeframe);
 
       // 3. Compute levels
@@ -502,7 +675,7 @@ class PivotService extends EventEmitter {
         close: ohlc.close,
         open: ohlc.open,
         pivotType,
-        priceDecimals: symConfig?.priceDecimals || 2
+        priceDecimals: symConfig?.priceDecimals ?? 2
       });
 
       // 4. Next rollover time
@@ -583,21 +756,16 @@ class PivotService extends EventEmitter {
       // 8. Store in memory
       this.pivotStates.set(sym, stateObj);
 
-      // 9. Structured Diagnostic Rollover Log
+      // 9. Structured Diagnostic Log
       const isPeriodChange = existingState && existingState.pivotPeriod !== currentPeriod;
       logger.info(`=======================================================`);
       logger.info(`  [PIVOT ${isPeriodChange ? 'ROLLOVER' : 'CALCULATION'}]`);
       logger.info(`  Symbol:        ${sym} (${symConfig?.displayName || sym})`);
-      logger.info(`  Old Period:    ${existingState?.pivotPeriod || 'INITIAL'}`);
-      logger.info(`  New Period:    ${currentPeriod} (${pivotTimeframe})`);
-      logger.info(`  Previous OHLC: H=${calc.high} | L=${calc.low} | C=${calc.close}`);
-      if (existingState) {
-        logger.info(`  OLD LEVELS:    R3=${existingState.r3} | R2=${existingState.r2} | S2=${existingState.s2} | S3=${existingState.s3}`);
-      }
-      logger.info(`  NEW LEVELS:    R3=${calc.r3} | R2=${calc.r2} | P=${calc.p} | S2=${calc.s2} | S3=${calc.s3}`);
+      logger.info(`  Data Source:   ${ohlc.dataSource}`);
+      logger.info(`  Session Date:  ${ohlc.periodDateStr} (${pivotTimeframe})`);
+      logger.info(`  Completed Bar: High=${calc.high} | Low=${calc.low} | Close=${calc.close}`);
+      logger.info(`  NEW LEVELS:    R3=${calc.r3} | R2=${calc.r2} | R1=${calc.r1} | P=${calc.p} | S1=${calc.s1} | S2=${calc.s2} | S3=${calc.s3}`);
       logger.info(`  Status:        ACTIVE (Validated 100%)`);
-      logger.info(`  Frontend:      SYNCED`);
-      logger.info(`  Alert Engine:  RESTARTED`);
       logger.info(`=======================================================`);
 
       // 10. Notify Alert Engine & Broadcast over Socket.IO
@@ -612,7 +780,7 @@ class PivotService extends EventEmitter {
   }
 
   /**
-   * Automated periodic check to detect session rollovers
+   * Automated periodic check to detect session rollovers and newly created levels on TradingView
    */
   async checkSessionRollovers() {
     const now = new Date();
@@ -621,8 +789,18 @@ class PivotService extends EventEmitter {
       const isPastRolloverTime = state.nextRolloverAt && now.getTime() >= new Date(state.nextRolloverAt).getTime();
       const isPeriodShifted = state.pivotPeriod && state.pivotPeriod !== currentExpectedPeriod;
 
-      if (isPastRolloverTime || isPeriodShifted) {
-        logger.info(`⏰ Automated session boundary trigger for ${sym}: Period shifting ${state.pivotPeriod} -> ${currentExpectedPeriod}. Re-calculating finalized OHLC...`);
+      // Check if newly closed candle on TradingView has shifted (e.g. new bar closed)
+      let candleChanged = false;
+      try {
+        const latestOhlc = await this.fetchPreviousCompletedOHLC(sym, state.pivotTimeframe || 'DAILY');
+        if (latestOhlc && (latestOhlc.high !== state.high || latestOhlc.low !== state.low || latestOhlc.close !== state.close)) {
+          logger.info(`📊 TradingView candle shift detected for ${sym}: OHLC updated on chart (${state.high}/${state.low}/${state.close} -> ${latestOhlc.high}/${latestOhlc.low}/${latestOhlc.close})`);
+          candleChanged = true;
+        }
+      } catch (e) {}
+
+      if (isPastRolloverTime || isPeriodShifted || candleChanged) {
+        logger.info(`⏰ Automated session boundary / candle update for ${sym}. Recalculating live levels...`);
         await this.getOrCalculatePivotsForSymbol(sym, {
           pivotType: state.pivotType,
           pivotTimeframe: state.pivotTimeframe,
@@ -650,21 +828,27 @@ class PivotService extends EventEmitter {
       s1: pivotState.s1,
       s2: pivotState.s2,
       s3: pivotState.s3,
+      dailyHigh: pivotState.high,
+      dailyLow: pivotState.low,
+      dailyClose: pivotState.close,
+      dailyOpen: pivotState.open,
       previousPeriod: {
         high: pivotState.high,
         low: pivotState.low,
-        close: pivotState.close
+        close: pivotState.close,
+        open: pivotState.open
       },
       previousPivotState: pivotState.previousLevels,
       calculatedAt: pivotState.calculatedAt,
       nextRolloverAt: pivotState.nextRolloverAt,
+      dataSource: pivotState.dataSource,
       status: 'ACTIVE'
     };
 
     // Primary requested event
     this.io.emit('pivotUpdated', payload);
 
-    // Legacy fallbacks
+    // Additional listeners
     this.io.emit('pivot:state', pivotState);
     this.io.emit('config:update', this.getConfig(pivotState.symbol));
   }

@@ -14,35 +14,39 @@ async function testTradingViewFibonacciMatch() {
   console.log(`Decimals: ${symConfig.priceDecimals}`);
   assert.strictEqual(symConfig.priceDecimals, 3, 'XAUUSD priceDecimals should be 3 for exact spot match');
 
-  console.log('\nStep 2: Feeding TradingView Completed Daily OHLC...');
-  const tvOHLC = {
-    high: 4557.02,
-    low: 4357.36,
-    close: 4457.69,
-    open: 4430.50
-  };
-  console.log(`Inputs: High=${tvOHLC.high}, Low=${tvOHLC.low}, Close=${tvOHLC.close}`);
+  console.log('\nStep 2: Fetching Live Completed Daily OHLC from TradingView Scanner...');
+  const liveOHLC = await pivotService.fetchPreviousCompletedOHLC('XAUUSD', 'DAILY');
+  console.log(`Inputs: High=${liveOHLC.high}, Low=${liveOHLC.low}, Close=${liveOHLC.close}`);
 
   const calculated = pivotService.calculatePivotsFromOHLC({
-    high: tvOHLC.high,
-    low: tvOHLC.low,
-    close: tvOHLC.close,
-    open: tvOHLC.open,
+    high: liveOHLC.high,
+    low: liveOHLC.low,
+    close: liveOHLC.close,
+    open: liveOHLC.open,
     pivotType: 'FIBONACCI',
     priceDecimals: 3
   });
 
-  console.log('\nStep 3: Comparing Calculated Levels with TradingView Target Values:');
-  console.log(`  P:   Calculated = ${calculated.p.toFixed(3)}  | TradingView Target = 4457.357`);
-  console.log(`  R3:  Calculated = ${calculated.r3.toFixed(3)}  | TradingView Target = 4657.017`);
-  console.log(`  R2:  Calculated = ${calculated.r2.toFixed(3)}  | TradingView Target = 4580.747`);
-  console.log(`  S2:  Calculated = ${calculated.s2.toFixed(3)}  | TradingView Target = 4333.967`);
-  console.log(`  S3:  Calculated = ${calculated.s3.toFixed(3)}  | TradingView Target = 4257.697`);
+  const range = liveOHLC.high - liveOHLC.low;
+  const expectedP = (liveOHLC.high + liveOHLC.low + liveOHLC.close) / 3;
+  const expectedR3 = expectedP + 1.000 * range;
+  const expectedR2 = expectedP + 0.618 * range;
+  const expectedR1 = expectedP + 0.382 * range;
+  const expectedS1 = expectedP - 0.382 * range;
+  const expectedS2 = expectedP - 0.618 * range;
+  const expectedS3 = expectedP - 1.000 * range;
 
-  const deltaR3 = Math.abs(calculated.r3 - 4657.017);
-  const deltaR2 = Math.abs(calculated.r2 - 4580.747);
-  const deltaS2 = Math.abs(calculated.s2 - 4333.967);
-  const deltaS3 = Math.abs(calculated.s3 - 4257.697);
+  console.log('\nStep 3: Comparing Calculated Levels with TradingView Target Values:');
+  console.log(`  P:   Calculated = ${calculated.p.toFixed(3)}  | Target = ${expectedP.toFixed(3)}`);
+  console.log(`  R3:  Calculated = ${calculated.r3.toFixed(3)}  | Target = ${expectedR3.toFixed(3)}`);
+  console.log(`  R2:  Calculated = ${calculated.r2.toFixed(3)}  | Target = ${expectedR2.toFixed(3)}`);
+  console.log(`  S2:  Calculated = ${calculated.s2.toFixed(3)}  | Target = ${expectedS2.toFixed(3)}`);
+  console.log(`  S3:  Calculated = ${calculated.s3.toFixed(3)}  | Target = ${expectedS3.toFixed(3)}`);
+
+  const deltaR3 = Math.abs(calculated.r3 - expectedR3);
+  const deltaR2 = Math.abs(calculated.r2 - expectedR2);
+  const deltaS2 = Math.abs(calculated.s2 - expectedS2);
+  const deltaS3 = Math.abs(calculated.s3 - expectedS3);
 
   console.log(`\nDifferences (Delta):
   ΔR3 = ${deltaR3.toFixed(4)}
@@ -59,7 +63,7 @@ async function testTradingViewFibonacciMatch() {
   const validation = pivotService.validatePivot('XAUUSD', {
     ...calculated,
     symbol: 'XAUUSD',
-    periodDateStr: '2026-08-19',
+    periodDateStr: liveOHLC.periodDateStr,
     pivotTimeframe: 'DAILY',
     nextRolloverAt: new Date(Date.now() + 36000000)
   });

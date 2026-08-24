@@ -23,9 +23,9 @@ export const DEFAULT_SYMBOLS = [
     symbol: 'XAGUSD',
     displayName: 'Silver / USD Spot',
     assetType: 'COMMODITY',
-    exchange: 'OANDA',
-    tradingViewTicker: 'OANDA:XAGUSD',
-    provider: 'TradingView Real-Time (OANDA)',
+    exchange: 'TVC',
+    tradingViewTicker: 'TVC:SILVER',
+    provider: 'TradingView Real-Time (TVC:SILVER)',
     timezone: 'America/New_York',
     sessionCloseUtc: '22:00',
     priceDecimals: 3,
@@ -249,27 +249,24 @@ class SymbolService extends EventEmitter {
         // Sync with MongoDB if connected
         for (const def of DEFAULT_SYMBOLS) {
           await SymbolConfig.findOneAndUpdate(
-            { symbol: def.symbol.toUpperCase() },
-            { $setOnInsert: def },
+            { symbol: def.symbol },
+            { $set: def },
             { upsert: true, new: true }
-          ).catch(() => {});
+          );
         }
 
-        // Load any custom user-added symbols from DB
-        const dbConfigs = await SymbolConfig.find({ enabled: true }).lean().catch(() => []);
-        dbConfigs.forEach(item => {
-          this.symbols.set(item.symbol.toUpperCase(), {
-            ...this.symbols.get(item.symbol.toUpperCase()),
-            ...item
-          });
-        });
-      } catch (err) {
-        logger.warn(`Database symbol sync deferred: ${err.message}. Using built-in symbol catalog.`);
+        // Load any active symbol preference from DB
+        const savedActive = await SymbolConfig.findOne({ isDefault: true }).lean();
+        if (savedActive) {
+          this.activeSymbol = savedActive.symbol;
+        }
+      } catch (dbErr) {
+        logger.warn(`Could not sync symbol registry with MongoDB: ${dbErr.message}`);
       }
     }
 
     this.isInitialized = true;
-    logger.info(`Symbol Catalog Ready (${this.symbols.size} symbols). Active: ${this.activeSymbol}`);
+    logger.info(`Symbol Registry loaded with ${this.symbols.size} verified multi-asset symbols. Active: ${this.activeSymbol}`);
   }
 
   getActiveSymbol() {
@@ -277,57 +274,70 @@ class SymbolService extends EventEmitter {
   }
 
   getActiveSymbolConfig() {
-    return this.getSymbol(this.activeSymbol) || DEFAULT_SYMBOLS[0];
+    return this.getSymbol(this.activeSymbol) || this.symbols.get('XAUUSD');
   }
 
   getSymbol(symbolStr) {
     if (!symbolStr) return null;
-    const clean = String(symbolStr).toUpperCase().replace(/[\/\-_]/g, '');
-    return this.symbols.get(clean) || null;
+    return this.symbols.get(symbolStr.toUpperCase()) || null;
   }
 
-  getAllSymbols(filterAssetType = null) {
-    const list = Array.from(this.symbols.values());
-    if (!filterAssetType || filterAssetType === 'ALL') return list;
-    return list.filter(s => s.assetType?.toUpperCase() === filterAssetType.toUpperCase());
+  getAllSymbols(assetType = null) {
+    const all = Array.from(this.symbols.values());
+    if (!assetType || assetType === 'ALL') return all;
+    return all.filter(s => s.assetType.toUpperCase() === assetType.toUpperCase());
   }
 
   searchSymbols(query = '', assetType = 'ALL') {
     const q = (query || '').trim().toLowerCase();
-    let results = Array.from(this.symbols.values());
+    const type = (assetType || 'ALL').toUpperCase();
 
-    if (assetType && assetType !== 'ALL') {
-      results = results.filter(s => s.assetType?.toUpperCase() === assetType.toUpperCase());
+    let list = Array.from(this.symbols.values());
+    if (type !== 'ALL') {
+      list = list.filter(s => s.assetType === type);
     }
 
-    if (!q) return results;
+    if (!q) return list;
 
-    return results.filter(s =>
+    return list.filter(s =>
       s.symbol.toLowerCase().includes(q) ||
       s.displayName.toLowerCase().includes(q) ||
-      s.exchange.toLowerCase().includes(q) ||
-      s.tradingViewTicker.toLowerCase().includes(q)
+      (s.exchange && s.exchange.toLowerCase().includes(q))
     );
   }
 
   async setActiveSymbol(symbolStr) {
-    const sym = this.getSymbol(symbolStr);
-    if (!sym) {
-      throw new Error(`Symbol '${symbolStr}' is not supported in the active catalog.`);
+    const sym = (symbolStr || '').toUpperCase();
+    if (!this.symbols.has(sym)) {
+      throw new Error(`Symbol '${sym}' is not supported in the active asset catalog.`);
     }
 
-    const previous = this.activeSymbol;
-    this.activeSymbol = sym.symbol.toUpperCase();
+    const previousSymbol = this.activeSymbol;
+    if (previousSymbol === sym) {
+      return this.symbols.get(sym);
+    }
 
-    logger.info(`🔄 Active symbol switched from ${previous} to ${this.activeSymbol} (${sym.displayName} on ${sym.exchange})`);
-    
+    this.activeSymbol = sym;
+    logger.info(`🔄 Active trading symbol switched from '${previousSymbol}' -> '${sym}'`);
+
+    // Update isDefault flag in DB if connected
+    if (mongoose.connection.readyState === 1) {
+      try {
+        await SymbolConfig.updateMany({}, { $set: { isDefault: false } });
+        await SymbolConfig.findOneAndUpdate({ symbol: sym }, { $set: { isDefault: true } });
+      } catch (dbErr) {
+        logger.warn(`Failed to persist active symbol switch in DB: ${dbErr.message}`);
+      }
+    }
+
+    const newConfig = this.symbols.get(sym);
     this.emit('activeSymbolChanged', {
-      previousSymbol: previous,
-      activeSymbol: this.activeSymbol,
-      config: sym
+      activeSymbol: sym,
+      previousSymbol,
+      config: newConfig
     });
 
-    return sym;
+    return newConfig;
   }
 }
 

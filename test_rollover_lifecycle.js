@@ -33,7 +33,7 @@ async function testRolloverLifecycle() {
   pivotService.fetchPreviousCompletedOHLC = async () => period1OHLC;
   pivotService.getCurrentPivotPeriod = () => '2026-08-20';
 
-  const state1 = await pivotService.getOrCalculatePivotsForSymbol(sym, { force: true });
+  const state1 = await pivotService.getOrCalculatePivotsForSymbol(sym, { pivotType: 'TRADITIONAL', force: true });
   assert.strictEqual(state1.pivotPeriod, '2026-08-20', 'Period 1 should be 2026-08-20');
   assert.strictEqual(state1.status, 'ACTIVE', 'Period 1 status should be ACTIVE');
   assert.strictEqual(state1.r3, 4500.00, 'Period 1 R3 should be 4500.00');
@@ -87,7 +87,7 @@ async function testRolloverLifecycle() {
     }
   };
 
-  const state2 = await pivotService.getOrCalculatePivotsForSymbol(sym, { force: true });
+  const state2 = await pivotService.getOrCalculatePivotsForSymbol(sym, { pivotType: 'TRADITIONAL', force: true });
 
   // Step 5: Verify Period 2 Calculations & Invariants
   console.log('\nStep 5: Verifying Period 2 Calculations and Replacement of Old Levels...');
@@ -128,7 +128,7 @@ async function testRolloverLifecycle() {
 
   // Step 9: Verify Idempotent Manual Recalculate
   console.log('\nStep 9: Verifying Manual Recalculate Button Idempotency...');
-  const state2Recheck = await pivotService.getOrCalculatePivotsForSymbol(sym, { force: false });
+  const state2Recheck = await pivotService.getOrCalculatePivotsForSymbol(sym, { pivotType: 'TRADITIONAL', force: false });
   assert.strictEqual(state2Recheck.pivotPeriod, '2026-08-21', 'Period should remain 2026-08-21');
   assert.strictEqual(state2Recheck.r3, 4650.00, 'R3 should remain 4650.00');
   console.log('✅ Manual recalculate safely preserves active period without duplicating.');

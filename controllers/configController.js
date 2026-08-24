@@ -42,7 +42,7 @@ export const updateConfig = async (req, res) => {
         calculatedAt: new Date()
       };
       pivotService.pivotStates.set(targetSymbol, state);
-      pivotService.broadcastPivotState(targetSymbol, state);
+      pivotService.broadcastPivotState(state);
     }
 
     const config = pivotService.getConfig(targetSymbol);
@@ -70,7 +70,7 @@ export const autoCalculatePivots = async (req, res) => {
   try {
     const { symbol, pivotType, pivotTimeframe } = req.body;
     const targetSymbol = symbol || pivotService.getConfig().symbol;
-    const updated = await pivotService.getOrCalculatePivotsForSymbol(targetSymbol, { pivotType, pivotTimeframe });
+    const updated = await pivotService.getOrCalculatePivotsForSymbol(targetSymbol, { pivotType, pivotTimeframe, force: true });
     res.json({ success: true, data: updated });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -79,10 +79,11 @@ export const autoCalculatePivots = async (req, res) => {
 
 export const getPivotHistory = async (req, res) => {
   try {
-    const { symbol } = req.query;
+    const { symbol, count, timeframe, pivotType } = req.query;
     const targetSymbol = (symbol || pivotService.getConfig().symbol).toUpperCase();
-    const pivotState = pivotService.getPivotState(targetSymbol);
-    res.json({ success: true, data: pivotState ? [pivotState] : [] });
+    const limit = parseInt(count || '10', 10);
+    const history = await pivotService.fetchCompletedOHLCHistory(targetSymbol, limit, timeframe || 'DAILY', pivotType || 'FIBONACCI');
+    res.json({ success: true, data: history });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
