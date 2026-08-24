@@ -117,7 +117,8 @@ class AlertService extends EventEmitter {
     if (!pivot || !pivot.isValid) return;
 
     const currentPrice = parseFloat(marketData.price);
-    const prevPrice = marketData.previousPrice !== null ? parseFloat(marketData.previousPrice) : currentPrice;
+    if (isNaN(currentPrice)) return;
+    const prevPrice = marketData.previousPrice !== null && !isNaN(marketData.previousPrice) ? parseFloat(marketData.previousPrice) : currentPrice;
     const tolerance = parseFloat(config.tolerance || 0.20);
     const retriggerDistance = parseFloat(config.retriggerDistance || 1.00);
 
@@ -186,6 +187,37 @@ class AlertService extends EventEmitter {
   }
 
   /**
+   * On-demand manual test alert trigger (used by TestConsoleModal)
+   */
+  async triggerTestAlert(levelName = 'R2', customPrice = null) {
+    const sym = symbolService.getActiveSymbol();
+    const pivot = pivotService.getActivePivotState();
+    const config = pivotService.getConfig(sym);
+    const lvlKey = levelName.toLowerCase();
+    const targetPrice = customPrice !== null && customPrice !== undefined && !isNaN(customPrice)
+      ? parseFloat(customPrice)
+      : (pivot?.[lvlKey] || config[lvlKey] || 4657.48);
+
+    const reason = `[TEST MODE] Simulated Touch on ${sym} Level ${levelName.toUpperCase()} @ $${targetPrice.toFixed(2)}`;
+
+    return await this.triggerAlertPipeline({
+      symbol: sym,
+      displayName: symbolService.getActiveSymbolConfig()?.displayName || sym,
+      level: levelName.toUpperCase(),
+      levelPrice: targetPrice,
+      currentPrice: targetPrice,
+      previousPrice: targetPrice - 1.0,
+      direction: levelName.toUpperCase().startsWith('R') ? 'TOUCH_RESISTANCE' : 'TOUCH_SUPPORT',
+      tolerance: config.tolerance || 0.20,
+      triggerReason: reason,
+      isTest: true,
+      pivotPeriod: pivot?.periodDateStr || 'DAILY',
+      pivotType: pivot?.pivotType || config.pivotType,
+      pivotTimeframe: pivot?.pivotTimeframe || config.pivotTimeframe
+    });
+  }
+
+  /**
    * Executes full alert pipeline: Screenshot -> Telegram -> MongoDB -> Socket.IO
    */
   async triggerAlertPipeline(alertParams) {
@@ -206,18 +238,23 @@ class AlertService extends EventEmitter {
       const config = pivotService.getConfig(sym);
       const symConfig = symbolService.getSymbol(sym) || symbolService.getActiveSymbolConfig();
 
-      // 1. Generate Real TradingView Screenshot for active symbol
+      // 1. Generate Real TradingView Screenshot for active symbol with dynamic range and spacing
       let screenshotData = { filename: '', fullPath: '', relativePath: '', buffer: null };
       try {
         screenshotData = await screenshotService.generateChartScreenshot({
           ...alertParams,
-          symbol: symConfig.tradingViewTicker || `OANDA:${sym}`,
+          symbol: symConfig?.tradingViewTicker || `OANDA:${sym}`,
+          timeframe: config.chartTimeframe || '15',
+          range: config.chartRange || '1D',
+          barSpacing: config.barSpacing || 22,
           pivotConfig: config,
           timestamp: new Date()
         });
       } catch (screenErr) {
         logger.error(`Screenshot generation error in alert pipeline: ${screenErr.message}`);
       }
+
+      const screenshotPath = screenshotData.cloudinaryUrl || screenshotData.relativePath || '';
 
       // 2. Dispatch Telegram Notification with screenshot
       let telegramResult = { success: false, messageId: null, error: null };
@@ -226,8 +263,8 @@ class AlertService extends EventEmitter {
           telegramResult = await telegramService.sendAlertNotification(
             {
               ...alertParams,
-              symbol: symConfig.displayName || sym,
-              tradingViewTicker: symConfig.tradingViewTicker,
+              symbol: symConfig?.displayName || sym,
+              tradingViewTicker: symConfig?.tradingViewTicker,
               pivot: config.pivot,
               timeframe: config.chartTimeframe
             },
@@ -246,8 +283,8 @@ class AlertService extends EventEmitter {
       try {
         eventDoc = await MarketEvent.create({
           symbol: sym,
-          assetType: symConfig.assetType,
-          exchange: symConfig.exchange,
+          assetType: symConfig?.assetType || 'COMMODITY',
+          exchange: symConfig?.exchange || 'OANDA',
           currentPrice: alertParams.currentPrice,
           previousPrice: alertParams.previousPrice,
           level: alertParams.level,
@@ -255,7 +292,7 @@ class AlertService extends EventEmitter {
           direction: alertParams.direction,
           tolerance: alertParams.tolerance,
           triggerReason: alertParams.triggerReason,
-          screenshotPath: screenshotData.relativePath || '',
+          screenshotPath,
           telegramStatus: telegramResult.success ? 'SENT' : 'FAILED',
           telegramMessage: telegramResult.message,
           telegramMessageId: telegramResult.messageId,
@@ -276,7 +313,7 @@ class AlertService extends EventEmitter {
           levelPrice: alertParams.levelPrice,
           direction: alertParams.direction,
           triggerReason: alertParams.triggerReason,
-          screenshotPath: screenshotData.relativePath || '',
+          screenshotPath,
           telegramStatus: telegramResult.success ? 'SENT' : 'FAILED',
           isTest: !!alertParams.isTest,
           timestamp: new Date()
@@ -288,11 +325,16 @@ class AlertService extends EventEmitter {
 
       // 5. Broadcast to Connected Web & Mobile Socket.IO Clients
       if (this.io) {
-        this.io.emit('alert:triggered', {
+        const payload = {
           event: eventDoc,
           alertStates: this.getAllLevelStates(sym),
           distances: marketDataService.getMarketData().distances
-        });
+        };
+
+        // Primary event
+        this.io.emit('alert:triggered', payload);
+        // Mobile legacy listener event
+        this.io.emit('alert_triggered', eventDoc);
       }
 
       this.emit('alertProcessed', eventDoc);

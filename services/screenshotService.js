@@ -15,6 +15,16 @@ if (!process.env.PLAYWRIGHT_BROWSERS_PATH) {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const SCREENSHOTS_DIR = path.join(__dirname, '../public/screenshots');
+const LOCAL_CHARTS_JS_PATH = path.join(__dirname, '../public/js/lightweight-charts.standalone.production.js');
+
+let localLightweightChartsJs = '';
+try {
+  if (fs.existsSync(LOCAL_CHARTS_JS_PATH)) {
+    localLightweightChartsJs = fs.readFileSync(LOCAL_CHARTS_JS_PATH, 'utf8');
+  }
+} catch (e) {
+  localLightweightChartsJs = '';
+}
 
 // Ensure screenshots directory exists
 if (!fs.existsSync(SCREENSHOTS_DIR)) {
@@ -166,7 +176,7 @@ class ScreenshotService {
   }
 
   /**
-   * Fetches real candlesticks starting from today's start date (00:00 UTC)
+   * Fetches real candlesticks starting from selected history range (1D, 2D, 3D, 5D)
    */
   async fetchCandlesForSession(timeframe = '15', range = '1D') {
     try {
@@ -193,9 +203,9 @@ class ScreenshotService {
       else if (r === '5D') startTime -= 4 * 86400000;
 
       const urls = [
-        `https://data-api.binance.vision/api/v3/klines?symbol=PAXGUSDT&interval=${intervalBinance}&startTime=${startTime}&limit=500`,
-        `https://api.binance.us/api/v3/klines?symbol=PAXGUSDT&interval=${intervalBinance}&startTime=${startTime}&limit=500`,
-        `https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval=${intervalBinance}&startTime=${startTime}&limit=500`
+        `https://data-api.binance.vision/api/v3/klines?symbol=PAXGUSDT&interval=${intervalBinance}&startTime=${startTime}&limit=1000`,
+        `https://api.binance.us/api/v3/klines?symbol=PAXGUSDT&interval=${intervalBinance}&startTime=${startTime}&limit=1000`,
+        `https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval=${intervalBinance}&startTime=${startTime}&limit=1000`
       ];
 
       for (const url of urls) {
@@ -259,20 +269,26 @@ class ScreenshotService {
       page = await this.context.newPage();
       page.setDefaultTimeout(this.timeoutMs);
 
-      // 1. Fetch candles starting from today's start date (00:00 UTC)
+      // 1. Fetch candles starting from selected history range
       let sessionCandles = await this.fetchCandlesForSession(dynamicInterval, dynamicRange);
 
       // Fallback synthetic candles if Binance API is unreachable
       if (!sessionCandles || sessionCandles.length === 0) {
         const nowSec = Math.floor(Date.now() / 1000);
-        const candleStep = dynamicInterval === '1' ? 60 : (dynamicInterval === '5' ? 300 : 900);
+        const candleStep = dynamicInterval === '1' ? 60 : (dynamicInterval === '5' ? 300 : (dynamicInterval === '15' ? 900 : (dynamicInterval === '60' || dynamicInterval === '1H' ? 3600 : 900)));
         sessionCandles = [];
         const basePrice = currentPrice || 4356.40;
         
-        // Generate today's candles from 00:00 UTC
+        // Generate candles spanning selected range
         const todayUtc = new Date();
         todayUtc.setUTCHours(0, 0, 0, 0);
-        let startSec = Math.floor(todayUtc.getTime() / 1000);
+        let startTimestamp = todayUtc.getTime();
+        const rUpper = dynamicRange.toUpperCase();
+        if (rUpper === '2D') startTimestamp -= 1 * 86400000;
+        else if (rUpper === '3D') startTimestamp -= 2 * 86400000;
+        else if (rUpper === '5D') startTimestamp -= 4 * 86400000;
+
+        let startSec = Math.floor(startTimestamp / 1000);
         let cur = basePrice - 12.0;
 
         for (let t = startSec; t <= nowSec; t += candleStep) {
@@ -403,10 +419,10 @@ class ScreenshotService {
 
     // Strictly the 4 levels: R3, R2, S2, S3
     const levels = [
-      { name: 'R3', price: pivotConfig.r3 || 4657.02 },
-      { name: 'R2', price: pivotConfig.r2 || 4580.75 },
-      { name: 'S2', price: pivotConfig.s2 || 4333.97 },
-      { name: 'S3', price: pivotConfig.s3 || 4257.70 }
+      { name: 'R3', price: Number(pivotConfig.r3 || (level === 'R3' ? levelPrice : 4657.02)) },
+      { name: 'R2', price: Number(pivotConfig.r2 || (level === 'R2' ? levelPrice : 4580.75)) },
+      { name: 'S2', price: Number(pivotConfig.s2 || (level === 'S2' ? levelPrice : 4333.97)) },
+      { name: 'S3', price: Number(pivotConfig.s3 || (level === 'S3' ? levelPrice : 4257.70)) }
     ];
 
     const firstCandle = candles[0] || { open: currentPrice, high: currentPrice, low: currentPrice, close: currentPrice };
@@ -423,6 +439,8 @@ class ScreenshotService {
 
     const bidPrice = (closePrice - 0.25).toFixed(2);
     const askPrice = (closePrice + 0.25).toFixed(2);
+
+    const legendLevelsStr = levels.map(l => `${l.name}: ${Number(l.price).toFixed(2)}`).join(', ');
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -598,7 +616,7 @@ class ScreenshotService {
       gap: 6px;
     }
   </style>
-  <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+  ${localLightweightChartsJs ? `<script>${localLightweightChartsJs}</script>` : `<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>`}
 </head>
 <body>
   <div id="chart_wrapper">
@@ -606,11 +624,11 @@ class ScreenshotService {
     <header id="tv_top_bar">
       <div class="top-left">
         <div class="tv-symbol-title">
-          <span>Gold Spot / U.S. Dollar</span>
+          <span>${ticker}</span>
           <span class="tv-dot">·</span>
           <span>${tfDisplay}</span>
           <span class="tv-dot">·</span>
-          <span>Capital.com</span>
+          <span>${chartRange}</span>
         </div>
         <div class="tv-ohlc">
           <span>O: <b>${openPrice.toFixed(2)}</b></span>
@@ -637,7 +655,7 @@ class ScreenshotService {
       ${level === 'MANUAL' ? `
       <div style="display: flex; align-items: center; gap: 8px; background: rgba(59, 130, 246, 0.2); border: 2px solid #3b82f6; border-radius: 6px; padding: 4px 12px; font-size: 12px; font-weight: 800; color: #93c5fd;">
         <span>📸</span>
-        <span>MANUAL CAPTURE · XAU/USD</span>
+        <span>MANUAL CAPTURE · ${ticker}</span>
       </div>
       ` : `
       <div class="alert-badge">
@@ -651,7 +669,7 @@ class ScreenshotService {
     <div id="chart_container">
       <div class="chart-legend">
         <div class="legend-title">
-          <span>Pivots (R3: 4473.76, R2: 4432.84, S2: 4300.45, S3: 4259.54)</span>
+          <span>Pivots (${legendLevelsStr})</span>
         </div>
       </div>
 

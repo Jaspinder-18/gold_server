@@ -1,5 +1,8 @@
+import mongoose from 'mongoose';
 import { pivotService } from '../services/pivotService.js';
 import { marketDataService } from '../services/marketDataService.js';
+import { AlertConfiguration } from '../models/AlertConfiguration.js';
+import { logger } from '../utils/logger.js';
 
 export const getConfig = async (req, res) => {
   try {
@@ -13,19 +16,68 @@ export const getConfig = async (req, res) => {
 
 export const updateConfig = async (req, res) => {
   try {
-    const { symbol, pivotType, pivotTimeframe, r3, r2, s2, s3, autoCalculatePivot } = req.body;
+    const {
+      symbol,
+      pivotType,
+      pivotTimeframe,
+      r3,
+      r2,
+      s2,
+      s3,
+      autoCalculatePivot,
+      chartRange,
+      chartTimeframe,
+      barSpacing,
+      tolerance,
+      retriggerDistance,
+      telegramAlertsEnabled,
+      enabled,
+      customChartUrl,
+      tradingViewTicker
+    } = req.body;
+
     const targetSymbol = (symbol || pivotService.getConfig().symbol).toUpperCase();
     
+    // Update alertConfigs in pivotService map
+    const existingCfg = pivotService.alertConfigs.get(targetSymbol) || {};
+    const newAlertCfg = {
+      ...existingCfg,
+      ...(chartRange !== undefined && { chartRange: String(chartRange) }),
+      ...(chartTimeframe !== undefined && { chartTimeframe: String(chartTimeframe) }),
+      ...(barSpacing !== undefined && { barSpacing: Number(barSpacing) }),
+      ...(tolerance !== undefined && { tolerance: parseFloat(tolerance) }),
+      ...(retriggerDistance !== undefined && { retriggerDistance: parseFloat(retriggerDistance) }),
+      ...(telegramAlertsEnabled !== undefined && { telegramAlertsEnabled: Boolean(telegramAlertsEnabled) }),
+      ...(enabled !== undefined && { enabled: Boolean(enabled) }),
+      ...(customChartUrl !== undefined && { customChartUrl: String(customChartUrl) }),
+      ...(tradingViewTicker !== undefined && { tradingViewTicker: String(tradingViewTicker) }),
+      ...(autoCalculatePivot !== undefined && { autoCalculatePivot: Boolean(autoCalculatePivot) }),
+      ...(pivotType !== undefined && { pivotType: String(pivotType) }),
+      ...(pivotTimeframe !== undefined && { pivotTimeframe: String(pivotTimeframe) })
+    };
+    pivotService.alertConfigs.set(targetSymbol, newAlertCfg);
+
+    // Also persist in MongoDB if connected
+    if (mongoose.connection.readyState === 1) {
+      try {
+        await AlertConfiguration.findOneAndUpdate(
+          { symbol: targetSymbol },
+          { $set: { symbol: targetSymbol, ...newAlertCfg } },
+          { upsert: true, new: true }
+        );
+      } catch (dbErr) {
+        logger.warn(`Could not persist AlertConfiguration: ${dbErr.message}`);
+      }
+    }
+
     let state;
     if (autoCalculatePivot !== false && (!r3 || !r2 || !s2 || !s3)) {
-      // Recalculate with new options if requested
       state = await pivotService.getOrCalculatePivotsForSymbol(targetSymbol, {
-        pivotType: pivotType || 'FIBONACCI',
-        pivotTimeframe: pivotTimeframe || 'DAILY',
+        pivotType: pivotType || newAlertCfg.pivotType || 'FIBONACCI',
+        pivotTimeframe: pivotTimeframe || newAlertCfg.pivotTimeframe || 'DAILY',
         force: true
       });
     } else if (r3 && r2 && s2 && s3) {
-      // Manual custom level override
       const currentState = pivotService.getPivotState(targetSymbol) || {};
       state = {
         ...currentState,
@@ -46,6 +98,7 @@ export const updateConfig = async (req, res) => {
     }
 
     const config = pivotService.getConfig(targetSymbol);
+    pivotService.broadcastPivotState();
     res.json({ success: true, data: config, pivotState: state });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
