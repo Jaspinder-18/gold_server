@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import { pivotService } from '../services/pivotService.js';
+import { symbolService } from '../services/symbolService.js';
 import { marketDataService } from '../services/marketDataService.js';
 import { AlertConfiguration } from '../models/AlertConfiguration.js';
 import { logger } from '../utils/logger.js';
