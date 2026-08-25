@@ -14,6 +14,17 @@ export const connectDB = async () => {
     });
     isConnected = true;
     logger.info(`MongoDB connected to external/local instance: ${conn.connection.host}/${conn.connection.name}`);
+
+    // Drop legacy conflicting indexes on pivotstates if present
+    try {
+      const collections = await conn.connection.db.listCollections({ name: 'pivotstates' }).toArray();
+      if (collections.length > 0) {
+        await conn.connection.db.collection('pivotstates').dropIndex('symbol_1_pivotType_1_pivotTimeframe_1').catch(() => {});
+      }
+    } catch (idxErr) {
+      // Non-critical index maintenance
+    }
+
     return conn;
   } catch (err) {
     logger.warn(`Could not connect to MongoDB URI (${uri}). Initializing embedded in-memory database fallback...`);

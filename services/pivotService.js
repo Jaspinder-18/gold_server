@@ -743,11 +743,24 @@ class PivotService extends EventEmitter {
             { $set: { status: 'HISTORICAL' } }
           );
 
-          await PivotState.findOneAndUpdate(
-            { symbol: sym, pivotType, pivotTimeframe, pivotPeriod: currentPeriod },
-            { $set: stateObj },
-            { upsert: true, new: true }
-          );
+          try {
+            await PivotState.findOneAndUpdate(
+              { symbol: sym, pivotType, pivotTimeframe, pivotPeriod: currentPeriod },
+              { $set: stateObj },
+              { upsert: true, new: true }
+            );
+          } catch (e11000) {
+            if (e11000.code === 11000) {
+              await PivotState.collection.dropIndex('symbol_1_pivotType_1_pivotTimeframe_1').catch(() => {});
+              await PivotState.findOneAndUpdate(
+                { symbol: sym, pivotType, pivotTimeframe },
+                { $set: stateObj },
+                { upsert: true, new: true }
+              );
+            } else {
+              throw e11000;
+            }
+          }
         } catch (dbErr) {
           logger.warn(`Could not persist PivotState in MongoDB: ${dbErr.message}`);
         }
@@ -780,7 +793,7 @@ class PivotService extends EventEmitter {
   }
 
   /**
-   * Automated periodic check to detect session rollovers and newly created levels on TradingView
+   * Automated periodic check to detect session rollovers
    */
   async checkSessionRollovers() {
     const now = new Date();
@@ -789,18 +802,8 @@ class PivotService extends EventEmitter {
       const isPastRolloverTime = state.nextRolloverAt && now.getTime() >= new Date(state.nextRolloverAt).getTime();
       const isPeriodShifted = state.pivotPeriod && state.pivotPeriod !== currentExpectedPeriod;
 
-      // Check if newly closed candle on TradingView has shifted (e.g. new bar closed)
-      let candleChanged = false;
-      try {
-        const latestOhlc = await this.fetchPreviousCompletedOHLC(sym, state.pivotTimeframe || 'DAILY');
-        if (latestOhlc && (latestOhlc.high !== state.high || latestOhlc.low !== state.low || latestOhlc.close !== state.close)) {
-          logger.info(`📊 TradingView candle shift detected for ${sym}: OHLC updated on chart (${state.high}/${state.low}/${state.close} -> ${latestOhlc.high}/${latestOhlc.low}/${latestOhlc.close})`);
-          candleChanged = true;
-        }
-      } catch (e) {}
-
-      if (isPastRolloverTime || isPeriodShifted || candleChanged) {
-        logger.info(`⏰ Automated session boundary / candle update for ${sym}. Recalculating live levels...`);
+      if (isPastRolloverTime || isPeriodShifted) {
+        logger.info(`⏰ Automated session boundary update for ${sym}. Recalculating live levels...`);
         await this.getOrCalculatePivotsForSymbol(sym, {
           pivotType: state.pivotType,
           pivotTimeframe: state.pivotTimeframe,
