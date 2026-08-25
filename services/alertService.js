@@ -49,13 +49,13 @@ class AlertService extends EventEmitter {
     const sym = (symbolStr || symbolService.getActiveSymbol()).toUpperCase();
     if (!this.symbolLevelStates.has(sym)) {
       this.symbolLevelStates.set(sym, {
-        R3: { status: 'READY', lastTriggerPrice: null, lastTriggerTime: null },
-        R2: { status: 'READY', lastTriggerPrice: null, lastTriggerTime: null },
-        R1: { status: 'READY', lastTriggerPrice: null, lastTriggerTime: null },
-        PIVOT: { status: 'READY', lastTriggerPrice: null, lastTriggerTime: null },
-        S1: { status: 'READY', lastTriggerPrice: null, lastTriggerTime: null },
-        S2: { status: 'READY', lastTriggerPrice: null, lastTriggerTime: null },
-        S3: { status: 'READY', lastTriggerPrice: null, lastTriggerTime: null }
+        R3: { status: 'READY', touchCount: 0, lastTriggerPrice: null, lastTriggerTime: null },
+        R2: { status: 'READY', touchCount: 0, lastTriggerPrice: null, lastTriggerTime: null },
+        R1: { status: 'READY', touchCount: 0, lastTriggerPrice: null, lastTriggerTime: null },
+        PIVOT: { status: 'READY', touchCount: 0, lastTriggerPrice: null, lastTriggerTime: null },
+        S1: { status: 'READY', touchCount: 0, lastTriggerPrice: null, lastTriggerTime: null },
+        S2: { status: 'READY', touchCount: 0, lastTriggerPrice: null, lastTriggerTime: null },
+        S3: { status: 'READY', touchCount: 0, lastTriggerPrice: null, lastTriggerTime: null }
       });
     }
     return this.symbolLevelStates.get(sym)[levelName];
@@ -69,7 +69,7 @@ class AlertService extends EventEmitter {
     const stateObj = this.symbolLevelStates.get(sym);
     const result = {};
     for (const [k, v] of Object.entries(stateObj)) {
-      result[k] = v.status;
+      result[k] = { status: v.status, touchCount: v.touchCount || 0, maxTouches: 2 };
     }
     return result;
   }
@@ -79,12 +79,12 @@ class AlertService extends EventEmitter {
     if (this.symbolLevelStates.has(sym)) {
       const states = this.symbolLevelStates.get(sym);
       for (const key of Object.keys(states)) {
-        states[key] = { status: 'READY', lastTriggerPrice: null, lastTriggerTime: null };
+        states[key] = { status: 'READY', touchCount: 0, lastTriggerPrice: null, lastTriggerTime: null };
       }
     } else {
       this.getLevelState(sym, 'R3');
     }
-    logger.alert(`✨ All level alert states for ${sym} have been reset to READY for new pivot period.`);
+    logger.alert(`✨ All level alert states for ${sym} have been reset to READY (touchCount=0) for new pivot period.`);
     if (this.io) {
       this.io.emit('alert:states', this.getAllLevelStates(sym));
     }
@@ -94,6 +94,7 @@ class AlertService extends EventEmitter {
     const state = this.getLevelState(symbolStr, levelName);
     if (state) {
       state.status = 'READY';
+      state.touchCount = 0;
       state.lastTriggerPrice = null;
       state.lastTriggerTime = null;
       logger.info(`Level ${levelName} for ${symbolStr} manually reset to READY.`);
@@ -105,6 +106,7 @@ class AlertService extends EventEmitter {
 
   /**
    * Core Level-Touch Evaluation Function with Tick Crossing & Range Detection
+   * Enforces strict maximum of 2 triggers/screenshots per level per active pivot period.
    */
   evaluateMarketPrice(marketData) {
     if (this.isProcessingAlert) return;
@@ -156,15 +158,23 @@ class AlertService extends EventEmitter {
         }
 
         if (state.status === 'PREVIOUSLY_TOUCHED' && distanceFromLast >= (retriggerDistance * 2.0)) {
-          state.status = 'READY';
-          logger.info(`Level ${lvl.name} (${sym}) fully reset to READY. Ready for fresh alerts.`);
-          if (this.io) this.io.emit('alert:states', this.getAllLevelStates(sym));
+          if ((state.touchCount || 0) < 2) {
+            state.status = 'READY';
+            logger.info(`Level ${lvl.name} (${sym}) re-armed to READY for touch #${(state.touchCount || 0) + 1}/2. Distance: ${distanceFromLast.toFixed(2)}`);
+            if (this.io) this.io.emit('alert:states', this.getAllLevelStates(sym));
+          } else {
+            state.status = 'COMPLETED';
+            logger.info(`Level ${lvl.name} (${sym}) has completed max 2 touches for current period. Locking level.`);
+            if (this.io) this.io.emit('alert:states', this.getAllLevelStates(sym));
+          }
         }
       }
 
-      // Trigger condition: Touching or Crossing while in READY state
-      if ((isTouching || isCrossing) && state.status === 'READY') {
-        const reason = `${sym} touched ${lvl.name} @ $${currentPrice.toFixed(2)} (Target: $${lvl.target.toFixed(2)}, Tolerance: ±$${tolerance.toFixed(2)})`;
+      // Trigger condition: Touching or Crossing while in READY state AND touchCount < 2
+      if ((isTouching || isCrossing) && state.status === 'READY' && (state.touchCount || 0) < 2) {
+        const nextTouchCount = (state.touchCount || 0) + 1;
+        state.touchCount = nextTouchCount;
+        const reason = `${sym} touched ${lvl.name} (Touch ${nextTouchCount}/2) @ $${currentPrice.toFixed(2)} (Target: $${lvl.target.toFixed(2)}, Tolerance: ±$${tolerance.toFixed(2)})`;
 
         this.triggerAlertPipeline({
           symbol: sym,
@@ -179,7 +189,8 @@ class AlertService extends EventEmitter {
           isTest: false,
           pivotPeriod: pivot.periodDateStr || 'DAILY',
           pivotType: pivot.pivotType,
-          pivotTimeframe: pivot.pivotTimeframe
+          pivotTimeframe: pivot.pivotTimeframe,
+          touchCount: nextTouchCount
         });
         break;
       }
@@ -198,7 +209,9 @@ class AlertService extends EventEmitter {
       ? parseFloat(customPrice)
       : (pivot?.[lvlKey] || config[lvlKey] || 4657.48);
 
-    const reason = `[TEST MODE] Simulated Touch on ${sym} Level ${levelName.toUpperCase()} @ $${targetPrice.toFixed(2)}`;
+    const state = this.getLevelState(sym, levelName.toUpperCase());
+    const nextTouchCount = state ? Math.min((state.touchCount || 0) + 1, 2) : 1;
+    const reason = `[TEST MODE] Simulated Touch ${nextTouchCount}/2 on ${sym} Level ${levelName.toUpperCase()} @ $${targetPrice.toFixed(2)}`;
 
     return await this.triggerAlertPipeline({
       symbol: sym,
@@ -213,7 +226,8 @@ class AlertService extends EventEmitter {
       isTest: true,
       pivotPeriod: pivot?.periodDateStr || 'DAILY',
       pivotType: pivot?.pivotType || config.pivotType,
-      pivotTimeframe: pivot?.pivotTimeframe || config.pivotTimeframe
+      pivotTimeframe: pivot?.pivotTimeframe || config.pivotTimeframe,
+      touchCount: nextTouchCount
     });
   }
 
@@ -225,12 +239,14 @@ class AlertService extends EventEmitter {
 
     try {
       const sym = (alertParams.symbol || symbolService.getActiveSymbol()).toUpperCase();
-      logger.alert(`>>> TRIGGERING ALERT: ${sym} ${alertParams.level} @ $${alertParams.currentPrice} (${alertParams.isTest ? 'TEST MODE' : 'LIVE MARKET'}) <<<`);
+      const currentTouch = alertParams.touchCount || 1;
+      logger.alert(`>>> TRIGGERING ALERT (Touch ${currentTouch}/2): ${sym} ${alertParams.level} @ $${alertParams.currentPrice} (${alertParams.isTest ? 'TEST MODE' : 'LIVE MARKET'}) <<<`);
 
-      // Lock state to TRIGGERED
+      // Update state
       const state = this.getLevelState(sym, alertParams.level);
       if (state) {
-        state.status = 'TRIGGERED';
+        state.touchCount = currentTouch;
+        state.status = currentTouch >= 2 ? 'COMPLETED' : 'TRIGGERED';
         state.lastTriggerPrice = alertParams.currentPrice;
         state.lastTriggerTime = new Date();
       }

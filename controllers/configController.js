@@ -57,6 +57,18 @@ export const updateConfig = async (req, res) => {
     };
     pivotService.alertConfigs.set(targetSymbol, newAlertCfg);
 
+    // Sync into symbolService in-memory catalog
+    const symObj = symbolService.getSymbol(targetSymbol);
+    if (symObj) {
+      if (chartRange !== undefined) symObj.chartRange = String(chartRange);
+      if (chartTimeframe !== undefined) symObj.chartTimeframe = String(chartTimeframe);
+      if (barSpacing !== undefined) symObj.barSpacing = Number(barSpacing);
+      if (tolerance !== undefined) symObj.tolerance = parseFloat(tolerance);
+      if (retriggerDistance !== undefined) symObj.retriggerDistance = parseFloat(retriggerDistance);
+      if (tradingViewTicker !== undefined) symObj.tradingViewTicker = String(tradingViewTicker);
+      if (customChartUrl !== undefined) symObj.customChartUrl = String(customChartUrl);
+    }
+
     // Also persist in MongoDB if connected
     if (mongoose.connection.readyState === 1) {
       try {
@@ -98,7 +110,12 @@ export const updateConfig = async (req, res) => {
     }
 
     const config = pivotService.getConfig(targetSymbol);
-    pivotService.broadcastPivotState();
+    if (!state) {
+      state = pivotService.getPivotState(targetSymbol);
+    }
+    if (state) {
+      pivotService.broadcastPivotState(state);
+    }
     res.json({ success: true, data: config, pivotState: state });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });

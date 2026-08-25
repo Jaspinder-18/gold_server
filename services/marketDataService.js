@@ -128,15 +128,16 @@ class MarketDataService extends EventEmitter {
   }
 
   /**
-   * Primary live quote fetcher supporting TradingView Scanner, Yahoo Finance, and Binance
+   * Primary live quote fetcher supporting Binance, Coinbase, TradingView Scanner, and Yahoo Finance
    */
   async fetchLiveQuoteForActiveSymbol() {
     const sym = this.activeSymbol;
     const symConfig = symbolService.getSymbol(sym) || symbolService.getActiveSymbolConfig();
-    const decimals = symConfig.priceDecimals || 2;
+    const decimals = symConfig?.priceDecimals || 2;
+    const isCrypto = symConfig?.assetType === 'CRYPTO';
 
-    // 1. Crypto: Binance Ticker API
-    if (symConfig.assetType === 'CRYPTO') {
+    // 1. Crypto Step A: Binance 24hr Ticker API
+    if (isCrypto) {
       try {
         const pair = sym.includes('USD') && !sym.includes('USDT') ? `${sym.replace('USD', 'USDT')}` : sym;
         const res = await axios.get(`https://api.binance.com/api/v3/ticker/24hr?symbol=${pair}`, { timeout: 4500 });
@@ -155,36 +156,102 @@ class MarketDataService extends EventEmitter {
           return;
         }
       } catch (err) {
-        logger.warn(`Binance 24hr quote failed for ${sym}: ${err.message}`);
+        // Fall through to TradingView Crypto Scanner
+      }
+
+      // 1. Crypto Step B: TradingView Crypto Scanner
+      try {
+        const pair = sym.includes('USD') && !sym.includes('USDT') ? `${sym.replace('USD', 'USDT')}` : sym;
+        const response = await axios.post(
+          'https://scanner.tradingview.com/crypto/scan',
+          {
+            symbols: { tickers: [`BINANCE:${pair}`, `COINBASE:${sym}`, `KRAKEN:${pair}`, `BITSTAMP:${sym}`] },
+            columns: ['name', 'close', 'change', 'change_abs', 'high', 'low', 'open', 'bid', 'ask', 'volume']
+          },
+          { headers: { 'Content-Type': 'application/json' }, timeout: 4500 }
+        );
+
+        if (response.data?.data && Array.isArray(response.data.data) && response.data.data.length > 0) {
+          const match = response.data.data.find(i => i.d && i.d[1] !== null);
+          if (match) {
+            const [, close, change, change_abs, high, low, open, bid, ask, volume] = match.d;
+            const price = parseFloat(parseFloat(close).toFixed(decimals));
+            const o = open ? parseFloat(parseFloat(open).toFixed(decimals)) : price;
+            const h = high ? parseFloat(parseFloat(high).toFixed(decimals)) : price;
+            const l = low ? parseFloat(parseFloat(low).toFixed(decimals)) : price;
+            const b = bid ? parseFloat(parseFloat(bid).toFixed(decimals)) : parseFloat((price - 0.50).toFixed(decimals));
+            const a = ask ? parseFloat(parseFloat(ask).toFixed(decimals)) : parseFloat((price + 0.50).toFixed(decimals));
+            const chg = change_abs !== null ? parseFloat(parseFloat(change_abs).toFixed(decimals)) : parseFloat((price - o).toFixed(decimals));
+            const chgPct = change !== null ? parseFloat(parseFloat(change).toFixed(2)) : parseFloat(((chg / o) * 100).toFixed(2));
+
+            this.updateMarketState({ price, open: o, high: h, low: l, bid: b, ask: a, change: chg, changePercent: chgPct, volume: volume || 0 });
+            return;
+          }
+        }
+      } catch (tvCryptoErr) {
+        // Fall through to Coinbase Spot API
+      }
+
+      // 1. Crypto Step C: Coinbase Public Spot API
+      try {
+        const coinBasePair = sym.replace('USD', '-USD');
+        const res = await axios.get(`https://api.coinbase.com/v2/prices/${coinBasePair}/spot`, { timeout: 4500 });
+        if (res.data?.data?.amount) {
+          const price = parseFloat(parseFloat(res.data.data.amount).toFixed(decimals));
+          const open = this.currentData.open || price;
+          const high = Math.max(this.currentData.high24h || price, price);
+          const low = Math.min(this.currentData.low24h || price, price);
+          const change = parseFloat((price - open).toFixed(decimals));
+          const changePercent = open ? parseFloat(((change / open) * 100).toFixed(2)) : 0;
+
+          this.updateMarketState({
+            price,
+            open,
+            high,
+            low,
+            bid: parseFloat((price - 0.50).toFixed(decimals)),
+            ask: parseFloat((price + 0.50).toFixed(decimals)),
+            change,
+            changePercent,
+            volume: this.currentData.volume || 1000
+          });
+          return;
+        }
+      } catch (cbErr) {
+        // Fall through to Yahoo Finance
       }
     }
 
     // 2. TradingView Scanner API (Forex, Commodities, Indices, Stocks)
     try {
-      const tvTicker = symConfig.tradingViewTicker || `OANDA:${sym}`;
+      const tvTicker = symConfig?.tradingViewTicker || `OANDA:${sym}`;
+      const scannerPath = symConfig?.assetType === 'STOCK' ? 'america' : (symConfig?.assetType === 'FOREX' ? 'forex' : 'cfd');
       const response = await axios.post(
-        'https://scanner.tradingview.com/cfd/scan',
+        `https://scanner.tradingview.com/${scannerPath}/scan`,
         {
-          symbols: { tickers: [tvTicker, `OANDA:${sym}`, `FX_IDC:${sym}`, `PEPPERSTONE:${sym}`] },
+          symbols: { tickers: [tvTicker, `OANDA:${sym}`, `FX_IDC:${sym}`, `PEPPERSTONE:${sym}`, `TVC:${sym}`] },
           columns: ['name', 'close', 'change', 'change_abs', 'high', 'low', 'open', 'bid', 'ask', 'volume']
         },
         { headers: { 'Content-Type': 'application/json' }, timeout: 4500 }
       );
 
-      if (response.data?.data?.[0]?.d) {
-        const [, close, change, change_abs, high, low, open, bid, ask, volume] = response.data.data[0].d;
-        if (close && !isNaN(close)) {
-          const price = parseFloat(parseFloat(close).toFixed(decimals));
-          const o = open ? parseFloat(parseFloat(open).toFixed(decimals)) : price;
-          const h = high ? parseFloat(parseFloat(high).toFixed(decimals)) : price;
-          const l = low ? parseFloat(parseFloat(low).toFixed(decimals)) : price;
-          const b = bid ? parseFloat(parseFloat(bid).toFixed(decimals)) : parseFloat((price - (0.01 * Math.pow(10, -decimals + 2))).toFixed(decimals));
-          const a = ask ? parseFloat(parseFloat(ask).toFixed(decimals)) : parseFloat((price + (0.01 * Math.pow(10, -decimals + 2))).toFixed(decimals));
-          const chg = change_abs !== null ? parseFloat(parseFloat(change_abs).toFixed(decimals)) : parseFloat((price - o).toFixed(decimals));
-          const chgPct = change !== null ? parseFloat(parseFloat(change).toFixed(2)) : parseFloat(((chg / o) * 100).toFixed(2));
+      if (response.data?.data && Array.isArray(response.data.data) && response.data.data.length > 0) {
+        const match = response.data.data.find(i => i.d && i.d[1] !== null);
+        if (match) {
+          const [, close, change, change_abs, high, low, open, bid, ask, volume] = match.d;
+          if (close && !isNaN(close)) {
+            const price = parseFloat(parseFloat(close).toFixed(decimals));
+            const o = open ? parseFloat(parseFloat(open).toFixed(decimals)) : price;
+            const h = high ? parseFloat(parseFloat(high).toFixed(decimals)) : price;
+            const l = low ? parseFloat(parseFloat(low).toFixed(decimals)) : price;
+            const b = bid ? parseFloat(parseFloat(bid).toFixed(decimals)) : parseFloat((price - (0.01 * Math.pow(10, -decimals + 2))).toFixed(decimals));
+            const a = ask ? parseFloat(parseFloat(ask).toFixed(decimals)) : parseFloat((price + (0.01 * Math.pow(10, -decimals + 2))).toFixed(decimals));
+            const chg = change_abs !== null ? parseFloat(parseFloat(change_abs).toFixed(decimals)) : parseFloat((price - o).toFixed(decimals));
+            const chgPct = change !== null ? parseFloat(parseFloat(change).toFixed(2)) : parseFloat(((chg / o) * 100).toFixed(2));
 
-          this.updateMarketState({ price, open: o, high: h, low: l, bid: b, ask: a, change: chg, changePercent: chgPct, volume: volume || 0 });
-          return;
+            this.updateMarketState({ price, open: o, high: h, low: l, bid: b, ask: a, change: chg, changePercent: chgPct, volume: volume || 0 });
+            return;
+          }
         }
       }
     } catch (tvErr) {
@@ -195,6 +262,9 @@ class MarketDataService extends EventEmitter {
     const yfMap = {
       XAUUSD: 'GC=F',
       XAGUSD: 'SI=F',
+      BTCUSD: 'BTC-USD',
+      ETHUSD: 'ETH-USD',
+      SOLUSD: 'SOL-USD',
       EURUSD: 'EURUSD=X',
       GBPUSD: 'GBPUSD=X',
       USDJPY: 'JPY=X',

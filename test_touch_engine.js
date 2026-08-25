@@ -96,10 +96,29 @@ async function testTouchEngine() {
     previousPrice: 4302.50
   });
 
-  assert.strictEqual(alertTriggeredCount, 2, 'Fresh alert should trigger now that level is reset');
-  console.log('✅ Fresh alert successfully triggered on return to S2!\n');
+  assert.strictEqual(alertTriggeredCount, 2, 'Fresh alert should trigger now that level is reset for touch #2');
+  console.log('✅ Fresh alert successfully triggered on return to S2 for touch #2!\n');
 
-  console.log('🎉 TOUCH DETECTION & ANTI-DUPLICATE HYSTERESIS TEST PASSED (100%)!');
+  // Step 7: Test Max 2 Touches Limit (Lock after touch #2)
+  console.log('Step 7: Verifying Max 2 Touches rule (Level locking after 2 touches)...');
+  // Price moves away again
+  alertService.evaluateMarketPrice({
+    rawSymbol: 'XAUUSD',
+    price: 4302.50,
+    previousPrice: 4300.00
+  });
+
+  // Price returns for a 3rd touch - MUST BE BLOCKED
+  alertService.evaluateMarketPrice({
+    rawSymbol: 'XAUUSD',
+    price: 4300.00,
+    previousPrice: 4302.50
+  });
+
+  assert.strictEqual(alertTriggeredCount, 2, 'Touch #3 must be blocked - Max 2 touches allowed per level');
+  console.log('✅ Max 2 Touches Limit verified: Touch #3 strictly blocked, screenshot/alert suppressed.\n');
+
+  console.log('🎉 TOUCH DETECTION, ANTI-DUPLICATE HYSTERESIS & 2-TOUCH LIMIT TEST PASSED (100%)!');
 }
 
 testTouchEngine().catch(err => {
