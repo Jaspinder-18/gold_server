@@ -5,6 +5,7 @@ import axios from 'axios';
 import { execSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import { cloudinaryService } from './cloudinaryService.js';
+import { symbolService } from './symbolService.js';
 import { logger } from '../utils/logger.js';
 
 // Ensure Playwright uses local project directory for browsers if on Render
@@ -40,68 +41,48 @@ class ScreenshotService {
     this.queue = [];
     this.isProcessingQueue = false;
 
-    // Viewport Resolution
-    this.viewportWidth = parseInt(process.env.SCREENSHOT_WIDTH || '1280', 10);
-    this.viewportHeight = parseInt(process.env.SCREENSHOT_HEIGHT || '720', 10);
-    this.deviceScaleFactor = parseInt(process.env.SCREENSHOT_DPR || '2', 10);
-    this.timeoutMs = parseInt(process.env.SCREENSHOT_TIMEOUT_MS || '35000', 10);
-    this.settleMs = parseInt(process.env.SCREENSHOT_SETTLE_MS || '2500', 10);
-
-    this.customChartUrl = process.env.TRADINGVIEW_CHART_URL || '';
+    // Viewport optimized for crystal clear chart screenshots
+    this.viewportWidth = 1280;
+    this.viewportHeight = 720;
+    this.deviceScaleFactor = 2; // Retina quality
+    this.settleMs = 2500;
+    this.timeoutMs = 30000;
+    this.maxRetries = 2;
+    this.cleanupTimer = null;
 
     this.stats = {
-      totalGenerated: 0,
-      lastScreenshotTime: null,
-      lastScreenshotLevel: null,
+      totalCaptured: 0,
+      totalFailed: 0,
+      averageCaptureTimeMs: 0,
+      lastCaptureTime: null,
       lastError: null
     };
   }
 
   /**
-   * Initializes persistent Playwright Chromium browser worker
+   * Initializes headless Playwright browser instance
    */
   async initialize() {
-    if (this.isBrowserReady || this.isInitializing) return;
+    if (this.isBrowserReady && this.context) return;
+    if (this.isInitializing) return;
     this.isInitializing = true;
 
     try {
-      logger.info('Initializing Playwright TradingView Browser Automation Engine...');
+      logger.info('Initializing Playwright isolated browser instance for TradingView screenshots...');
 
-      const launchArgs = [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
-        '--disable-gpu',
-        '--hide-scrollbars',
-        '--mute-audio',
-        '--disable-blink-features=AutomationControlled'
-      ];
-
-      try {
-        this.browser = await chromium.launch({
-          headless: true,
-          args: launchArgs
-        });
-      } catch (launchErr) {
-        if (launchErr.message.includes("Executable doesn't exist") || launchErr.message.includes('Please run the following command')) {
-          logger.warn('Playwright browser binary not found, attempting on-the-fly download...');
-          try {
-            execSync('npx playwright install chromium', { stdio: 'inherit', env: { ...process.env, PLAYWRIGHT_BROWSERS_PATH: '0' } });
-            this.browser = await chromium.launch({
-              headless: true,
-              args: launchArgs
-            });
-          } catch (instErr) {
-            logger.error(`Playwright auto-install failed: ${instErr.message}`);
-            throw launchErr;
-          }
-        } else {
-          throw launchErr;
-        }
-      }
+      this.browser = await chromium.launch({
+        headless: true,
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-gpu',
+          '--no-first-run',
+          '--no-zygote',
+          '--single-process',
+          '--disable-extensions'
+        ]
+      });
 
       this.context = await this.browser.newContext({
         viewport: {
@@ -116,8 +97,7 @@ class ScreenshotService {
       logger.info(`Playwright TradingView Engine ready (Resolution: ${this.viewportWidth}x${this.viewportHeight} @${this.deviceScaleFactor}x DPR).`);
 
       // Run initial screenshot cleanup
-      this.cleanupOldScreenshots();
-      this.cleanupTimer = setInterval(() => this.cleanupOldScreenshots(), 24 * 60 * 60 * 1000);
+      this.enforceMaxScreenshots(6);
     } catch (err) {
       logger.error('Failed to initialize Playwright browser worker', err);
       this.isBrowserReady = false;
@@ -139,12 +119,13 @@ class ScreenshotService {
         attempts: 0,
         queuedAt: Date.now()
       });
+
       this.processQueue();
     });
   }
 
   /**
-   * Worker queue processor to ensure non-blocking sequential screenshot capture
+   * Serialized queue processor to ensure zero race conditions and minimal RAM usage
    */
   async processQueue() {
     if (this.isProcessingQueue || this.queue.length === 0) return;
@@ -152,20 +133,25 @@ class ScreenshotService {
 
     while (this.queue.length > 0) {
       const job = this.queue.shift();
+      const startTime = Date.now();
+
       try {
         const result = await this.executeScreenshotCapture(job.alertData);
-        this.stats.totalGenerated += 1;
-        this.stats.lastScreenshotTime = new Date();
-        this.stats.lastScreenshotLevel = job.alertData.level;
+        const duration = Date.now() - startTime;
+        this.stats.totalCaptured++;
+        this.stats.lastCaptureTime = new Date();
+        this.stats.averageCaptureTimeMs = Math.round(
+          (this.stats.averageCaptureTimeMs * (this.stats.totalCaptured - 1) + duration) / this.stats.totalCaptured
+        );
+
         job.resolve(result);
       } catch (err) {
-        job.attempts += 1;
-        if (job.attempts < 3) {
-          logger.warn(`Screenshot capture attempt ${job.attempts} failed (${err.message}). Retrying in 2s...`);
-          await new Promise(r => setTimeout(r, 2000));
+        job.attempts++;
+        if (job.attempts < this.maxRetries) {
+          logger.warn(`Screenshot capture failed (attempt ${job.attempts}), retrying...`);
           this.queue.unshift(job);
         } else {
-          logger.error(`Screenshot capture permanently failed after 3 attempts: ${err.message}`);
+          this.stats.totalFailed++;
           this.stats.lastError = err.message;
           job.reject(err);
         }
@@ -176,21 +162,27 @@ class ScreenshotService {
   }
 
   /**
-   * Fetches real candlesticks starting from selected history range (1D, 2D, 3D, 5D)
+   * Fetches real candlesticks starting from selected history range for ANY symbol (Gold, Silver, Crypto, Forex, Indices, Stocks)
    */
-  async fetchCandlesForSession(timeframe = '15', range = '1D') {
+  async fetchCandlesForSession(symbol = 'XAUUSD', timeframe = '15', range = '1D', currentPrice = null) {
+    const rawSym = (symbol || 'XAUUSD').replace(/^.*:/, '').toUpperCase();
+    const symConfig = symbolService.getSymbol(rawSym) || symbolService.getActiveSymbolConfig();
+    const isCrypto = symConfig?.assetType === 'CRYPTO';
+    const decimals = symConfig?.priceDecimals || 2;
+
     try {
       let intervalBinance = '15m';
+      let intervalYf = '15m';
       const tf = String(timeframe).toUpperCase();
-      if (tf === '1' || tf === '1M') intervalBinance = '1m';
-      else if (tf === '3' || tf === '3M') intervalBinance = '3m';
-      else if (tf === '5' || tf === '5M') intervalBinance = '5m';
-      else if (tf === '15' || tf === '15M') intervalBinance = '15m';
-      else if (tf === '30' || tf === '30M') intervalBinance = '30m';
-      else if (tf === '60' || tf === '1H') intervalBinance = '1h';
-      else if (tf === '120' || tf === '2H') intervalBinance = '2h';
-      else if (tf === '240' || tf === '4H') intervalBinance = '4h';
-      else if (tf === 'D' || tf === '1D') intervalBinance = '1d';
+      if (tf === '1' || tf === '1M') { intervalBinance = '1m'; intervalYf = '1m'; }
+      else if (tf === '3' || tf === '3M') { intervalBinance = '3m'; intervalYf = '5m'; }
+      else if (tf === '5' || tf === '5M') { intervalBinance = '5m'; intervalYf = '5m'; }
+      else if (tf === '15' || tf === '15M') { intervalBinance = '15m'; intervalYf = '15m'; }
+      else if (tf === '30' || tf === '30M') { intervalBinance = '30m'; intervalYf = '30m'; }
+      else if (tf === '60' || tf === '1H') { intervalBinance = '1h'; intervalYf = '60m'; }
+      else if (tf === '120' || tf === '2H') { intervalBinance = '2h'; intervalYf = '60m'; }
+      else if (tf === '240' || tf === '4H') { intervalBinance = '4h'; intervalYf = '60m'; }
+      else if (tf === 'D' || tf === '1D') { intervalBinance = '1d'; intervalYf = '1d'; }
 
       // Determine start time based on today's UTC midnight and range
       const todayUtc = new Date();
@@ -198,33 +190,122 @@ class ScreenshotService {
       let startTime = todayUtc.getTime();
 
       const r = String(range).toUpperCase();
-      if (r === '2D') startTime -= 1 * 86400000;
-      else if (r === '3D') startTime -= 2 * 86400000;
-      else if (r === '5D') startTime -= 4 * 86400000;
+      let rangeYf = '1d';
+      if (r === '2D') { startTime -= 1 * 86400000; rangeYf = '2d'; }
+      else if (r === '3D') { startTime -= 2 * 86400000; rangeYf = '5d'; }
+      else if (r === '5D') { startTime -= 4 * 86400000; rangeYf = '5d'; }
 
-      const urls = [
-        `https://data-api.binance.vision/api/v3/klines?symbol=PAXGUSDT&interval=${intervalBinance}&startTime=${startTime}&limit=1000`,
-        `https://api.binance.us/api/v3/klines?symbol=PAXGUSDT&interval=${intervalBinance}&startTime=${startTime}&limit=1000`,
-        `https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval=${intervalBinance}&startTime=${startTime}&limit=1000`
-      ];
+      // 1. If Crypto -> Query Binance API
+      if (isCrypto) {
+        const pair = rawSym.includes('USD') && !rawSym.includes('USDT') ? `${rawSym.replace('USD', 'USDT')}` : rawSym;
+        const urls = [
+          `https://data-api.binance.vision/api/v3/klines?symbol=${pair}&interval=${intervalBinance}&startTime=${startTime}&limit=1000`,
+          `https://api.binance.com/api/v3/klines?symbol=${pair}&interval=${intervalBinance}&startTime=${startTime}&limit=1000`,
+          `https://api.binance.us/api/v3/klines?symbol=${pair}&interval=${intervalBinance}&startTime=${startTime}&limit=1000`
+        ];
 
-      for (const url of urls) {
-        try {
-          const res = await axios.get(url, { timeout: 4500 });
-          if (res.data && Array.isArray(res.data) && res.data.length > 0) {
-            return res.data.map(k => ({
-              time: Math.floor(k[0] / 1000),
-              open: parseFloat(k[1]),
-              high: parseFloat(k[2]),
-              low: parseFloat(k[3]),
-              close: parseFloat(k[4]),
-              volume: parseFloat(k[5])
-            }));
+        for (const url of urls) {
+          try {
+            const res = await axios.get(url, { timeout: 4500 });
+            if (res.data && Array.isArray(res.data) && res.data.length > 0) {
+              return res.data.map(k => ({
+                time: Math.floor(k[0] / 1000),
+                open: parseFloat(parseFloat(k[1]).toFixed(decimals)),
+                high: parseFloat(parseFloat(k[2]).toFixed(decimals)),
+                low: parseFloat(parseFloat(k[3]).toFixed(decimals)),
+                close: parseFloat(parseFloat(k[4]).toFixed(decimals)),
+                volume: parseFloat(k[5])
+              }));
+            }
+          } catch (e) {}
+        }
+      }
+
+      // 2. If Gold (XAUUSD) -> Query Binance PAXGUSDT
+      if (rawSym === 'XAUUSD') {
+        const urls = [
+          `https://data-api.binance.vision/api/v3/klines?symbol=PAXGUSDT&interval=${intervalBinance}&startTime=${startTime}&limit=1000`,
+          `https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval=${intervalBinance}&startTime=${startTime}&limit=1000`
+        ];
+
+        for (const url of urls) {
+          try {
+            const res = await axios.get(url, { timeout: 4500 });
+            if (res.data && Array.isArray(res.data) && res.data.length > 0) {
+              return res.data.map(k => ({
+                time: Math.floor(k[0] / 1000),
+                open: parseFloat(parseFloat(k[1]).toFixed(decimals)),
+                high: parseFloat(parseFloat(k[2]).toFixed(decimals)),
+                low: parseFloat(parseFloat(k[3]).toFixed(decimals)),
+                close: parseFloat(parseFloat(k[4]).toFixed(decimals)),
+                volume: parseFloat(k[5])
+              }));
+            }
+          } catch (e) {}
+        }
+      }
+
+      // 3. For all other assets (Silver, Forex, Indices, Stocks) -> Query Yahoo Finance Chart API
+      const yfMap = {
+        XAUUSD: 'GC=F',
+        XAGUSD: 'SI=F',
+        EURUSD: 'EURUSD=X',
+        GBPUSD: 'GBPUSD=X',
+        USDJPY: 'JPY=X',
+        AUDUSD: 'AUDUSD=X',
+        USDCAD: 'CAD=X',
+        USDCHF: 'CHF=X',
+        NZDUSD: 'NZDUSD=X',
+        NIFTY: '^NSEI',
+        BANKNIFTY: '^NSEBANK',
+        US30: '^DJI',
+        SPX: '^GSPC',
+        NASDAQ: '^IXIC',
+        AAPL: 'AAPL',
+        TSLA: 'TSLA',
+        NVDA: 'NVDA'
+      };
+
+      const yfTicker = yfMap[rawSym] || rawSym;
+      try {
+        const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yfTicker)}?interval=${intervalYf}&range=${rangeYf}`;
+        const res = await axios.get(url, {
+          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+          timeout: 4500
+        });
+
+        const result = res.data?.chart?.result?.[0];
+        if (result && result.timestamp && result.indicators?.quote?.[0]) {
+          const timestamps = result.timestamp;
+          const quotes = result.indicators.quote[0];
+          const candles = [];
+
+          for (let i = 0; i < timestamps.length; i++) {
+            const o = quotes.open[i];
+            const h = quotes.high[i];
+            const l = quotes.low[i];
+            const c = quotes.close[i];
+            if (o !== null && h !== null && l !== null && c !== null && !isNaN(c)) {
+              candles.push({
+                time: timestamps[i],
+                open: parseFloat(parseFloat(o).toFixed(decimals)),
+                high: parseFloat(parseFloat(h).toFixed(decimals)),
+                low: parseFloat(parseFloat(l).toFixed(decimals)),
+                close: parseFloat(parseFloat(c).toFixed(decimals)),
+                volume: quotes.volume?.[i] || 0
+              });
+            }
           }
-        } catch (e) {}
+
+          if (candles.length > 0) {
+            return candles;
+          }
+        }
+      } catch (yfErr) {
+        // Fall through to synthetic generator
       }
     } catch (err) {
-      logger.warn(`Failed to fetch fresh session klines (${err.message}), using fallback.`);
+      logger.warn(`Candle fetch notice for ${symbol}: ${err.message}`);
     }
 
     return null;
@@ -253,31 +334,36 @@ class ScreenshotService {
       barSpacing
     } = alertData;
 
+    const rawSym = (symbol || 'XAUUSD').replace(/^.*:/, '').toUpperCase();
+    const symConfig = symbolService.getSymbol(rawSym) || symbolService.getActiveSymbolConfig();
+    const decimals = symConfig?.priceDecimals || (rawSym.includes('JPY') ? 3 : (rawSym.includes('EUR') || rawSym.includes('GBP') ? 5 : 2));
+
     const dynamicInterval = String(timeframe || pivotConfig?.chartTimeframe || '15');
     const dynamicRange = String(range || pivotConfig?.chartRange || '1D');
     const dynamicBarSpacing = Number(barSpacing || pivotConfig?.barSpacing || (dynamicRange === '1D' ? 22 : (dynamicRange === '2D' ? 14 : (dynamicRange === '3D' ? 9 : 6))));
 
     const timestampClean = Date.now();
-    const filename = `alert-${level.toLowerCase()}-${timestampClean}.png`;
+    const filename = `alert-${rawSym.toLowerCase()}-${level.toLowerCase()}-${timestampClean}.png`;
     const fullPath = path.join(SCREENSHOTS_DIR, filename);
     const relativePath = `/screenshots/${filename}`;
 
-    logger.info(`📸 Capturing clean TradingView chart (${dynamicInterval}m, ${dynamicRange} range, ${dynamicBarSpacing}px barSpacing) for ${level} alert at $${currentPrice}...`);
+    logger.info(`📸 Capturing clean TradingView chart for ${rawSym} (${dynamicInterval}m, ${dynamicRange} range, ${dynamicBarSpacing}px barSpacing) for ${level} alert at $${currentPrice}...`);
 
     let page = null;
     try {
       page = await this.context.newPage();
       page.setDefaultTimeout(this.timeoutMs);
 
-      // 1. Fetch candles starting from selected history range
-      let sessionCandles = await this.fetchCandlesForSession(dynamicInterval, dynamicRange);
+      // 1. Fetch candles for THIS specific symbol
+      let sessionCandles = await this.fetchCandlesForSession(rawSym, dynamicInterval, dynamicRange, currentPrice);
 
-      // Fallback synthetic candles if Binance API is unreachable
+      // Fallback synthetic candles tailored strictly to the specific asset's price and volatility
       if (!sessionCandles || sessionCandles.length === 0) {
         const nowSec = Math.floor(Date.now() / 1000);
         const candleStep = dynamicInterval === '1' ? 60 : (dynamicInterval === '5' ? 300 : (dynamicInterval === '15' ? 900 : (dynamicInterval === '60' || dynamicInterval === '1H' ? 3600 : 900)));
         sessionCandles = [];
-        const basePrice = currentPrice || 4356.40;
+        const basePrice = Number(currentPrice) || (symConfig?.defaultPrice || 100.0);
+        const volStep = Math.max(Math.pow(10, -decimals), basePrice * 0.0012);
         
         // Generate candles spanning selected range
         const todayUtc = new Date();
@@ -289,14 +375,14 @@ class ScreenshotService {
         else if (rUpper === '5D') startTimestamp -= 4 * 86400000;
 
         let startSec = Math.floor(startTimestamp / 1000);
-        let cur = basePrice - 12.0;
+        let cur = basePrice - (volStep * 2);
 
         for (let t = startSec; t <= nowSec; t += candleStep) {
-          const delta = (Math.random() - 0.48) * 3.5;
-          const open = cur;
-          const close = cur + delta;
-          const high = Math.max(open, close) + Math.random() * 2.0;
-          const low = Math.min(open, close) - Math.random() * 2.0;
+          const delta = (Math.random() - 0.48) * volStep;
+          const open = parseFloat(cur.toFixed(decimals));
+          const close = parseFloat((cur + delta).toFixed(decimals));
+          const high = parseFloat((Math.max(open, close) + Math.random() * volStep * 0.8).toFixed(decimals));
+          const low = parseFloat((Math.min(open, close) - Math.random() * volStep * 0.8).toFixed(decimals));
           sessionCandles.push({ time: t, open, high, low, close });
           cur = close;
         }
@@ -314,7 +400,8 @@ class ScreenshotService {
 
       // 2. Build high-fidelity TradingView Canvas HTML with exact level lines
       const html = this.buildTradingViewHtml({
-        ticker: symbol || 'OANDA:XAUUSD',
+        ticker: symConfig?.tradingViewTicker || symbol || `OANDA:${rawSym}`,
+        rawSymbol: rawSym,
         interval: dynamicInterval,
         chartRange: dynamicRange,
         barSpacing: dynamicBarSpacing,
@@ -325,6 +412,7 @@ class ScreenshotService {
         formattedDate,
         pivotConfig,
         candles: sessionCandles,
+        decimals,
         isTest
       });
 
@@ -341,7 +429,7 @@ class ScreenshotService {
       });
 
       fs.writeFileSync(fullPath, buffer);
-      logger.info(`TradingView chart screenshot captured successfully: ${filename} (${Math.round(buffer.length / 1024)} KB)`);
+      logger.info(`TradingView chart screenshot captured successfully for ${rawSym}: ${filename} (${Math.round(buffer.length / 1024)} KB)`);
 
       // 3. Upload to Cloudinary if configured
       let cloudinaryUrl = null;
@@ -403,6 +491,7 @@ class ScreenshotService {
    */
   buildTradingViewHtml({
     ticker,
+    rawSymbol = 'XAUUSD',
     interval,
     chartRange = '1D',
     barSpacing = 22,
@@ -413,6 +502,7 @@ class ScreenshotService {
     formattedDate,
     pivotConfig = {},
     candles = [],
+    decimals = 2,
     isTest
   }) {
     const tfDisplay = this.formatIntervalDisplay(interval);
@@ -426,21 +516,21 @@ class ScreenshotService {
     ];
 
     const firstCandle = candles[0] || { open: currentPrice, high: currentPrice, low: currentPrice, close: currentPrice };
-    const lastCandle = candles[candles.length - 1] || firstCandle;
     const openPrice = firstCandle.open || currentPrice;
     const highPrice = Math.max(...candles.map(c => c.high), currentPrice);
     const lowPrice = Math.min(...candles.map(c => c.low), currentPrice);
     const closePrice = currentPrice;
     const diff = closePrice - openPrice;
-    const diffPercent = (diff / openPrice) * 100;
+    const diffPercent = openPrice ? (diff / openPrice) * 100 : 0;
     const isPositive = diff >= 0;
-    const changeText = `${isPositive ? '+' : ''}${diff.toFixed(2)} (${isPositive ? '+' : ''}${diffPercent.toFixed(2)}%)`;
+    const changeText = `${isPositive ? '+' : ''}${diff.toFixed(decimals)} (${isPositive ? '+' : ''}${diffPercent.toFixed(2)}%)`;
     const changeColor = isPositive ? '#089981' : '#f23645';
 
-    const bidPrice = (closePrice - 0.25).toFixed(2);
-    const askPrice = (closePrice + 0.25).toFixed(2);
+    const spread = tolerance ? (tolerance * 0.5) : (closePrice * 0.0005);
+    const bidPrice = (closePrice - spread).toFixed(decimals);
+    const askPrice = (closePrice + spread).toFixed(decimals);
 
-    const legendLevelsStr = levels.map(l => `${l.name}: ${Number(l.price).toFixed(2)}`).join(', ');
+    const legendLevelsStr = levels.map(l => `${l.name}: ${Number(l.price).toFixed(decimals)}`).join(', ');
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -631,10 +721,10 @@ class ScreenshotService {
           <span>${chartRange}</span>
         </div>
         <div class="tv-ohlc">
-          <span>O: <b>${openPrice.toFixed(2)}</b></span>
-          <span>H: <b>${highPrice.toFixed(2)}</b></span>
-          <span>L: <b>${lowPrice.toFixed(2)}</b></span>
-          <span>C: <b>${closePrice.toFixed(2)}</b></span>
+          <span>O: <b>${openPrice.toFixed(decimals)}</b></span>
+          <span>H: <b>${highPrice.toFixed(decimals)}</b></span>
+          <span>L: <b>${lowPrice.toFixed(decimals)}</b></span>
+          <span>C: <b>${closePrice.toFixed(decimals)}</b></span>
           <span class="tv-change">${changeText}</span>
         </div>
         <div class="trade-buttons">
@@ -655,12 +745,12 @@ class ScreenshotService {
       ${level === 'MANUAL' ? `
       <div style="display: flex; align-items: center; gap: 8px; background: rgba(59, 130, 246, 0.2); border: 2px solid #3b82f6; border-radius: 6px; padding: 4px 12px; font-size: 12px; font-weight: 800; color: #93c5fd;">
         <span>📸</span>
-        <span>MANUAL CAPTURE · ${ticker}</span>
+        <span>MANUAL CAPTURE · ${rawSymbol}</span>
       </div>
       ` : `
       <div class="alert-badge">
         <span>${isTest ? '🧪' : '🚨'}</span>
-        <span>LEVEL TOUCH: <span class="highlight">${level}</span> @ $${Number(levelPrice).toFixed(2)}</span>
+        <span>LEVEL TOUCH: <span class="highlight">${level}</span> @ $${Number(levelPrice).toFixed(decimals)}</span>
       </div>
       `}
     </header>
@@ -737,8 +827,8 @@ class ScreenshotService {
       wickDownColor: '#f23645',
       priceFormat: {
         type: 'price',
-        precision: 2,
-        minMove: 0.01
+        precision: ${decimals},
+        minMove: ${Math.pow(10, -decimals)}
       }
     });
 
@@ -754,6 +844,7 @@ class ScreenshotService {
     const candleHighs = rawData.map(c => c.high).filter(v => typeof v === 'number' && !isNaN(v));
     let targetMin = candleLows.length ? Math.min(...candleLows) : Number(${currentPrice});
     let targetMax = candleHighs.length ? Math.max(...candleHighs) : Number(${currentPrice});
+    const baseVal = Number(${currentPrice}) || 100.0;
 
     // If an active level was touched, include that level in the zoom frame
     if (activeLevelName !== 'MANUAL') {
@@ -763,22 +854,23 @@ class ScreenshotService {
         targetMax = Math.max(targetMax, activeLvlObj.price);
       }
     } else {
-      // For general / manual chart view, frame with nearby levels within reasonable distance
+      // For general / manual chart view, frame with nearby levels within reasonable distance (<= 2.5% of price)
+      const maxDist = baseVal * 0.025;
       const lowerLevels = levels.filter(l => l.price <= targetMin).map(l => l.price);
       const upperLevels = levels.filter(l => l.price >= targetMax).map(l => l.price);
       if (lowerLevels.length) {
         const closestLower = Math.max(...lowerLevels);
-        if (targetMin - closestLower <= 20) targetMin = Math.min(targetMin, closestLower);
+        if (targetMin - closestLower <= maxDist) targetMin = Math.min(targetMin, closestLower);
       }
       if (upperLevels.length) {
         const closestUpper = Math.min(...upperLevels);
-        if (closestUpper - targetMax <= 20) targetMax = Math.max(targetMax, closestUpper);
+        if (closestUpper - targetMax <= maxDist) targetMax = Math.max(targetMax, closestUpper);
       }
     }
 
-    const pad = Math.max((targetMax - targetMin) * 0.08, 2.5);
-    const finalMin = parseFloat((targetMin - pad).toFixed(2));
-    const finalMax = parseFloat((targetMax + pad).toFixed(2));
+    const pad = Math.max((targetMax - targetMin) * 0.08, baseVal * 0.001);
+    const finalMin = parseFloat((targetMin - pad).toFixed(${decimals}));
+    const finalMax = parseFloat((targetMax + pad).toFixed(${decimals}));
 
     candleSeries.applyOptions({
       autoscaleInfoProvider: (original) => {
@@ -799,7 +891,7 @@ class ScreenshotService {
         lineWidth: isTouched ? 3 : 2, // BOLD for touched
         lineStyle: LightweightCharts.LineStyle.Solid,
         axisLabelVisible: true,
-        title: lvl.name + ' ($' + lvl.price.toFixed(2) + ')'
+        title: lvl.name + ' ($' + Number(lvl.price).toFixed(${decimals}) + ')'
       });
     });
 

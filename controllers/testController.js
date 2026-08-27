@@ -26,20 +26,38 @@ export const triggerTestAlert = async (req, res) => {
 
 export const captureLiveScreenshot = async (req, res) => {
   try {
-    const { level = 'MANUAL', symbol, timeframe, range, barSpacing } = req.body;
-    const config = pivotService.getConfig();
-    const currentPrice = marketDataService.getCurrentPrice() || 4442.30;
+    const { symbolService } = await import('../services/symbolService.js');
+    const { level = 'MANUAL', symbol, price, timeframe, range, barSpacing } = req.body;
+    const rawSym = (symbol || symbolService.getActiveSymbol() || 'XAUUSD').replace(/^.*:/, '').toUpperCase();
+    const symConfig = symbolService.getSymbol(rawSym) || symbolService.getActiveSymbolConfig();
+    const config = pivotService.getConfig(rawSym);
+    
+    // Resolve live price for the requested symbol
+    let currentPrice = price ? Number(price) : null;
+    if (!currentPrice) {
+      if (marketDataService.activeSymbol === rawSym && marketDataService.getCurrentPrice()) {
+        currentPrice = marketDataService.getCurrentPrice();
+      } else {
+        const liveData = marketDataService.getMarketData();
+        if (liveData?.rawSymbol === rawSym && liveData?.price) {
+          currentPrice = liveData.price;
+        } else {
+          currentPrice = symConfig?.defaultPrice || (rawSym === 'XAGUSD' ? 68.28 : (rawSym === 'BTCUSD' ? 79636.0 : (marketDataService.getCurrentPrice() || 100.0)));
+        }
+      }
+    }
+
     const dynamicTimeframe = String(timeframe || config.chartTimeframe || '15');
     const dynamicRange = String(range || config.chartRange || '1D');
     const dynamicBarSpacing = Number(barSpacing || config.barSpacing || 22);
     
-    logger.info(`Capturing on-demand TradingView chart screenshot (${dynamicTimeframe}m, ${dynamicRange} range, ${dynamicBarSpacing}px barSpacing) for ${level}...`);
+    logger.info(`Capturing on-demand TradingView chart screenshot for ${rawSym} (${dynamicTimeframe}m, ${dynamicRange} range, ${dynamicBarSpacing}px barSpacing) for ${level} @ $${currentPrice}...`);
     const screenshotData = await screenshotService.generateChartScreenshot({
-      symbol: symbol || process.env.TRADINGVIEW_TICKER || 'OANDA:XAUUSD',
+      symbol: symConfig?.tradingViewTicker || symbol || `OANDA:${rawSym}`,
       level,
       levelPrice: currentPrice,
       currentPrice,
-      tolerance: config.tolerance || 0.20,
+      tolerance: config.tolerance || symConfig?.tolerance || 0.20,
       timeframe: dynamicTimeframe,
       range: dynamicRange,
       barSpacing: dynamicBarSpacing,
@@ -52,14 +70,14 @@ export const captureLiveScreenshot = async (req, res) => {
 
     // Save manual capture to MongoDB so it persists across refreshes
     const event = await MarketEvent.create({
-      symbol: symbol || 'XAUUSD',
+      symbol: rawSym,
       level: 'MANUAL',
       levelPrice: currentPrice,
       currentPrice,
-      tolerance: config.tolerance || 0.20,
+      tolerance: config.tolerance || symConfig?.tolerance || 0.20,
       screenshotPath,
       telegramStatus: 'SKIPPED',
-      triggerReason: `Manual TradingView screenshot capture (${dynamicTimeframe}m, ${dynamicRange} range, ${dynamicBarSpacing}px barSpacing)`,
+      triggerReason: `Manual TradingView screenshot capture for ${rawSym} (${dynamicTimeframe}m, ${dynamicRange} range, ${dynamicBarSpacing}px barSpacing)`,
       timestamp: new Date(),
       isTest: true
     });
