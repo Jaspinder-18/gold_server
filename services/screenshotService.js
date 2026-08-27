@@ -417,12 +417,12 @@ class ScreenshotService {
   }) {
     const tfDisplay = this.formatIntervalDisplay(interval);
 
-    // Strictly the 4 levels: R3, R2, S2, S3
+    // Strictly the 4 levels: R3, R2, S2, S3 dynamically from active pivotConfig or current alert
     const levels = [
-      { name: 'R3', price: Number(pivotConfig.r3 || (level === 'R3' ? levelPrice : 4657.02)) },
-      { name: 'R2', price: Number(pivotConfig.r2 || (level === 'R2' ? levelPrice : 4580.75)) },
-      { name: 'S2', price: Number(pivotConfig.s2 || (level === 'S2' ? levelPrice : 4333.97)) },
-      { name: 'S3', price: Number(pivotConfig.s3 || (level === 'S3' ? levelPrice : 4257.70)) }
+      { name: 'R3', price: Number(pivotConfig?.r3 || (level === 'R3' ? levelPrice : currentPrice * 1.015)) },
+      { name: 'R2', price: Number(pivotConfig?.r2 || (level === 'R2' ? levelPrice : currentPrice * 1.008)) },
+      { name: 'S2', price: Number(pivotConfig?.s2 || (level === 'S2' ? levelPrice : currentPrice * 0.992)) },
+      { name: 'S3', price: Number(pivotConfig?.s3 || (level === 'S3' ? levelPrice : currentPrice * 0.985)) }
     ];
 
     const firstCandle = candles[0] || { open: currentPrice, high: currentPrice, low: currentPrice, close: currentPrice };

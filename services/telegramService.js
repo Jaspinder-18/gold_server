@@ -31,6 +31,8 @@ class TelegramService {
       timeframe = '15m',
       pivotPeriod = 'Daily',
       timestamp = new Date(),
+      touchCount = 1,
+      isLocked = false,
       isTest = false
     } = alertData;
 
@@ -41,19 +43,36 @@ class TelegramService {
     const isResistance = level.startsWith('R');
     const actionEmoji = isResistance ? '📈' : '📉';
     const levelType = isResistance ? 'Resistance' : 'Support';
-    const alertHeader = isTest ? `🧪 [TEST] ${symbol} MARKET ALERT` : `🚨 ${symbol} MARKET ALERT`;
+    
+    let alertHeader;
+    if (isTest) {
+      alertHeader = `🧪 [TEST] ${symbol} MARKET ALERT`;
+    } else if (isLocked || touchCount >= 2) {
+      alertHeader = `🚨 ${symbol} MARKET ALERT [🔒 TOUCH 2/2 - LEVEL LOCKED]`;
+    } else {
+      alertHeader = `🚨 ${symbol} MARKET ALERT [TOUCH ${touchCount}/2]`;
+    }
+
+    const touchBadge = isLocked || touchCount >= 2 
+      ? `🔒 <b>STATUS:</b> <code>TOUCH 2/2 (MAX REACHED - LEVEL LOCKED)</code>` 
+      : `🎯 <b>STATUS:</b> <code>TOUCH ${touchCount}/2 (ACTIVE)</code>`;
+
+    const lockNotice = (isLocked || touchCount >= 2)
+      ? `\n⚠️ <b>NOTE:</b> Level ${level} has reached maximum 2 touches. Alerts for this level are now <b>LOCKED</b> until the next period.\n`
+      : '';
 
     return `${alertHeader}
 
 📊 <b>SYMBOL:</b> <code>${symbol}</code> ${tradingViewTicker ? `(${tradingViewTicker})` : ''}
 🎯 <b>LEVEL:</b> <code>${level} (${levelType})</code>
+${touchBadge}
 💰 <b>PRICE:</b> <code>${Number(currentPrice).toFixed(2)}</code>
 📌 <b>${level} TARGET:</b> <code>${Number(levelPrice).toFixed(2)}</code>
 ${pivot ? `⚖️ <b>PIVOT (P):</b> <code>${Number(pivot).toFixed(2)}</code>\n` : ''}📐 <b>TOLERANCE:</b> <code>±${Number(tolerance).toFixed(2)}</code>
 ⏱ <b>TIMEFRAME:</b> <code>${timeframe}</code>
 📅 <b>PIVOT PERIOD:</b> <code>${pivotPeriod}</code>
 ${previousPrice ? `🔄 <b>PREV PRICE:</b> <code>${Number(previousPrice).toFixed(2)}</code>\n` : ''}
-${actionEmoji} <b>ACTION:</b> Price touched <b>${level}</b> level on live chart.
+${actionEmoji} <b>ACTION:</b> Price touched <b>${level}</b> level on live chart.${lockNotice}
 🕐 <b>TIME:</b> ${dateFormatted} | ${timeFormatted} UTC
 
 📸 <i>TradingView chart capture attached.</i>`;

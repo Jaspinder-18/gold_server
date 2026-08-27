@@ -26,6 +26,7 @@ export const updateConfig = async (req, res) => {
       s2,
       s3,
       autoCalculatePivot,
+      autoCalcIntervalMinutes,
       chartRange,
       chartTimeframe,
       barSpacing,
@@ -53,6 +54,7 @@ export const updateConfig = async (req, res) => {
       ...(customChartUrl !== undefined && { customChartUrl: String(customChartUrl) }),
       ...(tradingViewTicker !== undefined && { tradingViewTicker: String(tradingViewTicker) }),
       ...(autoCalculatePivot !== undefined && { autoCalculatePivot: Boolean(autoCalculatePivot) }),
+      ...(autoCalcIntervalMinutes !== undefined && { autoCalcIntervalMinutes: Number(autoCalcIntervalMinutes) }),
       ...(pivotType !== undefined && { pivotType: String(pivotType) }),
       ...(pivotTimeframe !== undefined && { pivotTimeframe: String(pivotTimeframe) })
     };

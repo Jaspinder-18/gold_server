@@ -36,6 +36,10 @@ const AlertConfigurationSchema = new mongoose.Schema({
     type: Boolean,
     default: true
   },
+  autoCalcIntervalMinutes: {
+    type: Number,
+    default: 15
+  },
   pivotType: {
     type: String,
     enum: ['TRADITIONAL', 'FIBONACCI', 'CAMARILLA', 'WOODIE', 'CLASSIC'],

@@ -34,9 +34,14 @@ class AlertService extends EventEmitter {
     });
 
     // Listen to new pivot levels and rollover
-    pivotService.on('pivot:updated', ({ symbol, state }) => {
-      logger.alert(`🔄 Alert Engine re-binding to NEW pivot levels for ${symbol}: R3=${state.r3}, R2=${state.r2}, S2=${state.s2}, S3=${state.s3}`);
-      this.resetAllLevelStates(symbol);
+    pivotService.on('pivot:updated', ({ symbol, state, isDifferent }) => {
+      // Only reset all level states if levels actually changed or a new period began
+      if (isDifferent !== false) {
+        logger.alert(`🔄 Alert Engine re-binding to NEW pivot levels for ${symbol}: R3=${state.r3}, R2=${state.r2}, S2=${state.s2}, S3=${state.s3}`);
+        this.resetAllLevelStates(symbol);
+      } else {
+        logger.info(`ℹ️ Levels unchanged for ${symbol}. Retaining existing touch lock states.`);
+      }
     });
 
     // Run initial cleanup to keep max 6 latest records
@@ -136,6 +141,11 @@ class AlertService extends EventEmitter {
 
       const state = this.getLevelState(sym, lvl.name);
       if (!state) continue;
+
+      // Strict 2-touch lock check: if level is already COMPLETED / LOCKED / has 2 touches, skip immediately
+      if (state.status === 'COMPLETED' || state.status === 'LOCKED' || (state.touchCount || 0) >= 2) {
+        continue;
+      }
 
       const diff = Math.abs(currentPrice - lvl.target);
       
@@ -240,10 +250,18 @@ class AlertService extends EventEmitter {
     try {
       const sym = (alertParams.symbol || symbolService.getActiveSymbol()).toUpperCase();
       const currentTouch = alertParams.touchCount || 1;
-      logger.alert(`>>> TRIGGERING ALERT (Touch ${currentTouch}/2): ${sym} ${alertParams.level} @ $${alertParams.currentPrice} (${alertParams.isTest ? 'TEST MODE' : 'LIVE MARKET'}) <<<`);
 
       // Update state
       const state = this.getLevelState(sym, alertParams.level);
+      
+      // Strict 2-touch lock gate: block live market alerts if level is already locked and touchCount > 2
+      if (!alertParams.isTest && state && (state.status === 'COMPLETED' || state.status === 'LOCKED') && state.touchCount >= 2) {
+        logger.warn(`🛑 Alert suppressed: Level ${alertParams.level} for ${sym} is locked (2/2 touches reached).`);
+        return null;
+      }
+
+      logger.alert(`>>> TRIGGERING ALERT (Touch ${currentTouch}/2${currentTouch >= 2 ? ' - LEVEL LOCKED' : ''}): ${sym} ${alertParams.level} @ $${alertParams.currentPrice} (${alertParams.isTest ? 'TEST MODE' : 'LIVE MARKET'}) <<<`);
+
       if (state) {
         state.touchCount = currentTouch;
         state.status = currentTouch >= 2 ? 'COMPLETED' : 'TRIGGERED';
@@ -272,7 +290,7 @@ class AlertService extends EventEmitter {
 
       const screenshotPath = screenshotData.cloudinaryUrl || screenshotData.relativePath || '';
 
-      // 2. Dispatch Telegram Notification with screenshot
+      // 2. Dispatch Telegram Notification with screenshot and touch lock badge
       let telegramResult = { success: false, messageId: null, error: null };
       if (config.telegramAlertsEnabled !== false) {
         try {
@@ -282,7 +300,9 @@ class AlertService extends EventEmitter {
               symbol: symConfig?.displayName || sym,
               tradingViewTicker: symConfig?.tradingViewTicker,
               pivot: config.pivot,
-              timeframe: config.chartTimeframe
+              timeframe: config.chartTimeframe,
+              touchCount: currentTouch,
+              isLocked: currentTouch >= 2
             },
             screenshotData.fullPath || screenshotData.buffer
           );

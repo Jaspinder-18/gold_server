@@ -12,6 +12,7 @@ class PivotService extends EventEmitter {
     this.pivotStates = new Map(); // symbol -> PivotState
     this.alertConfigs = new Map(); // symbol -> AlertConfiguration
     this.rolloverCheckTimer = null;
+    this.autoCalcTimer = null;
     this.io = null;
   }
 
@@ -35,6 +36,10 @@ class PivotService extends EventEmitter {
     // Schedule automated session rollover checking every 30 seconds
     if (this.rolloverCheckTimer) clearInterval(this.rolloverCheckTimer);
     this.rolloverCheckTimer = setInterval(() => this.checkSessionRollovers(), 30000);
+
+    // Schedule periodic auto-calculation interval check (15m, 30m, etc.) every 30 seconds
+    if (this.autoCalcTimer) clearInterval(this.autoCalcTimer);
+    this.autoCalcTimer = setInterval(() => this.runPeriodicAutoCalculation(), 30000);
 
     logger.info(`Pivot Service ready. Active Symbol '${activeSym}' Levels: P=${this.getPivotState(activeSym)?.p || 'N/A'}`);
   }
@@ -70,6 +75,7 @@ class PivotService extends EventEmitter {
       barSpacing: Number(alertCfg.barSpacing || symConfig?.barSpacing || 22),
       enabled: alertCfg.enabled !== false,
       autoCalculatePivot: alertCfg.autoCalculatePivot !== false,
+      autoCalcIntervalMinutes: alertCfg.autoCalcIntervalMinutes !== undefined ? Number(alertCfg.autoCalcIntervalMinutes) : 15,
       pivotType: pivot?.pivotType || alertCfg.pivotType || 'FIBONACCI',
       pivotTimeframe: pivot?.pivotTimeframe || alertCfg.pivotTimeframe || 'DAILY',
       tolerance: alertCfg.tolerance !== undefined ? Number(alertCfg.tolerance) : (symConfig?.tolerance || 0.20),
@@ -769,7 +775,14 @@ class PivotService extends EventEmitter {
       // 8. Store in memory
       this.pivotStates.set(sym, stateObj);
 
-      // 9. Structured Diagnostic Log
+      // 9. Structured Diagnostic Log & Difference Detection
+      const isDifferent = !existingState ||
+        existingState.r3 !== calc.r3 ||
+        existingState.r2 !== calc.r2 ||
+        existingState.s2 !== calc.s2 ||
+        existingState.s3 !== calc.s3 ||
+        existingState.pivotPeriod !== currentPeriod;
+
       const isPeriodChange = existingState && existingState.pivotPeriod !== currentPeriod;
       logger.info(`=======================================================`);
       logger.info(`  [PIVOT ${isPeriodChange ? 'ROLLOVER' : 'CALCULATION'}]`);
@@ -778,11 +791,12 @@ class PivotService extends EventEmitter {
       logger.info(`  Session Date:  ${ohlc.periodDateStr} (${pivotTimeframe})`);
       logger.info(`  Completed Bar: High=${calc.high} | Low=${calc.low} | Close=${calc.close}`);
       logger.info(`  NEW LEVELS:    R3=${calc.r3} | R2=${calc.r2} | R1=${calc.r1} | P=${calc.p} | S1=${calc.s1} | S2=${calc.s2} | S3=${calc.s3}`);
+      logger.info(`  Levels Changed: ${isDifferent ? 'YES (New levels active in memory)' : 'NO (Unchanged)'}`);
       logger.info(`  Status:        ACTIVE (Validated 100%)`);
       logger.info(`=======================================================`);
 
       // 10. Notify Alert Engine & Broadcast over Socket.IO
-      this.emit('pivot:updated', { symbol: sym, state: stateObj });
+      this.emit('pivot:updated', { symbol: sym, state: stateObj, previousState: existingState, isDifferent });
       this.broadcastPivotState(stateObj);
 
       return stateObj;
@@ -813,11 +827,41 @@ class PivotService extends EventEmitter {
     }
   }
 
+  /**
+   * Periodic automatic recalculation worker (runs every 15m, 30m, etc.)
+   */
+  async runPeriodicAutoCalculation() {
+    const now = new Date();
+    for (const [sym, state] of this.pivotStates.entries()) {
+      const cfg = this.getConfig(sym);
+      if (!cfg || cfg.enabled === false || cfg.autoCalculatePivot === false) continue;
+
+      const intervalMin = Number(cfg.autoCalcIntervalMinutes || 15);
+      if (intervalMin <= 0) continue;
+
+      const intervalMs = intervalMin * 60 * 1000;
+      const lastCalcTime = state?.calculatedAt ? new Date(state.calculatedAt).getTime() : 0;
+      const elapsed = now.getTime() - lastCalcTime;
+
+      if (elapsed >= intervalMs) {
+        logger.info(`⏰ [AUTO-CALC ${intervalMin}m] Triggering automatic recalculation for ${sym} (elapsed: ${Math.round(elapsed / 60000)}m)...`);
+        await this.getOrCalculatePivotsForSymbol(sym, {
+          pivotType: cfg.pivotType || state.pivotType,
+          pivotTimeframe: cfg.pivotTimeframe || state.pivotTimeframe,
+          force: true,
+          isPeriodic: true
+        });
+      }
+    }
+  }
+
   broadcastPivotState(specificState) {
     if (!this.io) return;
     const activeSym = symbolService.getActiveSymbol();
     const pivotState = specificState || this.getActivePivotState();
     if (!pivotState) return;
+
+    const symConfig = this.getConfig(pivotState.symbol);
 
     const payload = {
       symbol: pivotState.symbol,
@@ -844,6 +888,7 @@ class PivotService extends EventEmitter {
       previousPivotState: pivotState.previousLevels,
       calculatedAt: pivotState.calculatedAt,
       nextRolloverAt: pivotState.nextRolloverAt,
+      autoCalcIntervalMinutes: symConfig.autoCalcIntervalMinutes || 15,
       dataSource: pivotState.dataSource,
       status: 'ACTIVE'
     };
@@ -853,7 +898,7 @@ class PivotService extends EventEmitter {
 
     // Additional listeners
     this.io.emit('pivot:state', pivotState);
-    this.io.emit('config:update', this.getConfig(pivotState.symbol));
+    this.io.emit('config:update', symConfig);
   }
 }
 
