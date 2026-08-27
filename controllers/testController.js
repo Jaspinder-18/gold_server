@@ -93,3 +93,20 @@ export const testTelegram = async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 };
+
+export const triggerCleanup = async (req, res) => {
+  try {
+    const { cleanupService } = await import('../services/cleanupService.js');
+    const { maxAgeDays = 5 } = req.body || {};
+    const result = await cleanupService.run5DayCleanup(Number(maxAgeDays) || 5);
+    res.json({
+      success: true,
+      message: `Completed 5-day retention cleanup.`,
+      data: result
+    });
+  } catch (err) {
+    logger.error('Error executing cleanup', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+

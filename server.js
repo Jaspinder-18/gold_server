@@ -18,6 +18,7 @@ import { pivotService } from './services/pivotService.js';
 import { alertService } from './services/alertService.js';
 import { screenshotService } from './services/screenshotService.js';
 import { keepAliveService } from './services/keepAliveService.js';
+import { cleanupService } from './services/cleanupService.js';
 
 // Route imports
 import marketRoutes from './routes/marketRoutes.js';
@@ -188,6 +189,9 @@ const startServer = async () => {
 
       // 8. Start Automatic Keep-Alive Service (Pings /api/health every 13 minutes)
       keepAliveService.start(PORT);
+
+      // 9. Start Automated 5-Day Data & Screenshot Retention Worker
+      cleanupService.initialize(6);
     });
   } catch (err) {
     logger.error('Fatal Startup Error', err);
@@ -200,6 +204,9 @@ const gracefulShutdown = async () => {
   logger.info('Shutting down server gracefully...');
   try {
     keepAliveService.stop();
+  } catch (e) {}
+  try {
+    cleanupService.stop();
   } catch (e) {}
   try {
     if (screenshotService.shutdown) {
