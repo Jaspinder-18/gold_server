@@ -19,9 +19,11 @@ class AlertService extends EventEmitter {
     super();
     this.io = null;
 
-    // Per-symbol level trigger states: symbol -> { R3: { status, lastTriggerPrice, lastTriggerTime }, ... }
+    // Per-symbol level trigger states: symbol -> { R3: { status, touchCount, lastTriggerPrice, lastTriggerTime }, ... }
     this.symbolLevelStates = new Map();
     this.isProcessingAlert = false;
+    this.lastProcessedDateStr = new Date().toISOString().split('T')[0];
+    this.dailyResetTimer = null;
   }
 
   async initialize(socketServer) {
@@ -34,15 +36,14 @@ class AlertService extends EventEmitter {
     });
 
     // Listen to new pivot levels and rollover
-    pivotService.on('pivot:updated', ({ symbol, state, isDifferent }) => {
-      // Only reset all level states if levels actually changed or a new period began
-      if (isDifferent !== false) {
-        logger.alert(`🔄 Alert Engine re-binding to NEW pivot levels for ${symbol}: R3=${state.r3}, R2=${state.r2}, S2=${state.s2}, S3=${state.s3}`);
-        this.resetAllLevelStates(symbol);
-      } else {
-        logger.info(`ℹ️ Levels unchanged for ${symbol}. Retaining existing touch lock states.`);
-      }
+    pivotService.on('pivot:updated', ({ symbol, state }) => {
+      logger.alert(`🔄 Alert Engine re-binding to pivot levels for ${symbol}: R3=${state?.r3}, R2=${state?.r2}, S2=${state?.s2}, S3=${state?.s3}`);
+      this.resetAllLevelStates(symbol);
     });
+
+    // Start Daily Session Rollover & Midnight Reset worker (checks every 30s)
+    if (this.dailyResetTimer) clearInterval(this.dailyResetTimer);
+    this.dailyResetTimer = setInterval(() => this.checkDailyRolloverReset(), 30000);
 
     // Run initial cleanup to keep max 6 latest records
     await this.enforceMaxHistory(6);
@@ -50,8 +51,38 @@ class AlertService extends EventEmitter {
     logger.alert('Level Touch Alert Engine ready.');
   }
 
+  /**
+   * Periodic check to ensure level alert states are 100% refreshed every new day / session
+   */
+  checkDailyRolloverReset() {
+    const todayDateStr = new Date().toISOString().split('T')[0];
+    if (this.lastProcessedDateStr !== todayDateStr) {
+      logger.alert(`🌅 Midnight UTC Rollover detected (${this.lastProcessedDateStr} -> ${todayDateStr}). Resetting all level alert states to READY.`);
+      this.lastProcessedDateStr = todayDateStr;
+      for (const sym of this.symbolLevelStates.keys()) {
+        this.resetAllLevelStates(sym);
+      }
+    }
+
+    // Safety auto-rearm: If any level was triggered > 12 hours ago, auto-rearm to READY
+    const now = Date.now();
+    for (const [sym, states] of this.symbolLevelStates.entries()) {
+      for (const [lvl, st] of Object.entries(states)) {
+        if (st.lastTriggerTime && (st.status === 'TRIGGERED' || st.status === 'COMPLETED')) {
+          const elapsed = now - new Date(st.lastTriggerTime).getTime();
+          if (elapsed > 12 * 60 * 60 * 1000) {
+            logger.info(`⏰ Auto-rearming stale level ${lvl} for ${sym} (last touch was ${Math.round(elapsed / 3600000)}h ago).`);
+            st.status = 'READY';
+            st.touchCount = 0;
+            if (this.io) this.io.emit('alert:states', this.getAllLevelStates(sym));
+          }
+        }
+      }
+    }
+  }
+
   getLevelState(symbolStr, levelName) {
-    const sym = (symbolStr || symbolService.getActiveSymbol()).toUpperCase();
+    const sym = (symbolStr || symbolService.getActiveSymbol()).replace(/^.*:/, '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
     if (!this.symbolLevelStates.has(sym)) {
       this.symbolLevelStates.set(sym, {
         R3: { status: 'READY', touchCount: 0, lastTriggerPrice: null, lastTriggerTime: null },
@@ -67,7 +98,7 @@ class AlertService extends EventEmitter {
   }
 
   getAllLevelStates(symbolStr) {
-    const sym = (symbolStr || symbolService.getActiveSymbol()).toUpperCase();
+    const sym = (symbolStr || symbolService.getActiveSymbol()).replace(/^.*:/, '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
     if (!this.symbolLevelStates.has(sym)) {
       this.getLevelState(sym, 'R3'); // Initializer
     }
@@ -80,7 +111,7 @@ class AlertService extends EventEmitter {
   }
 
   resetAllLevelStates(symbolStr) {
-    const sym = (symbolStr || symbolService.getActiveSymbol()).toUpperCase();
+    const sym = (symbolStr || symbolService.getActiveSymbol()).replace(/^.*:/, '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
     if (this.symbolLevelStates.has(sym)) {
       const states = this.symbolLevelStates.get(sym);
       for (const key of Object.keys(states)) {
@@ -89,29 +120,31 @@ class AlertService extends EventEmitter {
     } else {
       this.getLevelState(sym, 'R3');
     }
-    logger.alert(`✨ All level alert states for ${sym} have been reset to READY (touchCount=0) for new pivot period.`);
+    logger.alert(`✨ All level alert states for ${sym} have been reset to READY (touchCount=0) for new session period.`);
     if (this.io) {
       this.io.emit('alert:states', this.getAllLevelStates(sym));
     }
   }
 
   resetLevelState(symbolStr, levelName) {
-    const state = this.getLevelState(symbolStr, levelName);
+    const sym = (symbolStr || symbolService.getActiveSymbol()).replace(/^.*:/, '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+    const state = this.getLevelState(sym, levelName);
     if (state) {
       state.status = 'READY';
       state.touchCount = 0;
       state.lastTriggerPrice = null;
       state.lastTriggerTime = null;
-      logger.info(`Level ${levelName} for ${symbolStr} manually reset to READY.`);
+      logger.info(`Level ${levelName} for ${sym} manually reset to READY.`);
       if (this.io) {
-        this.io.emit('alert:states', this.getAllLevelStates(symbolStr));
+        this.io.emit('alert:states', this.getAllLevelStates(sym));
       }
     }
   }
 
+
   /**
    * Core Level-Touch Evaluation Function with Tick Crossing & Range Detection
-   * Enforces strict maximum of 2 triggers/screenshots per level per active pivot period.
+   * Enforces 2 triggers/screenshots per level per active pivot period with automatic daily refresh.
    */
   evaluateMarketPrice(marketData) {
     if (this.isProcessingAlert) return;
@@ -142,7 +175,7 @@ class AlertService extends EventEmitter {
       const state = this.getLevelState(sym, lvl.name);
       if (!state) continue;
 
-      // Strict 2-touch lock check: if level is already COMPLETED / LOCKED / has 2 touches, skip immediately
+      // 2-touch lock check: if level is already COMPLETED / LOCKED / has >=2 touches, check hysteresis
       if (state.status === 'COMPLETED' || state.status === 'LOCKED' || (state.touchCount || 0) >= 2) {
         continue;
       }
@@ -174,7 +207,7 @@ class AlertService extends EventEmitter {
             if (this.io) this.io.emit('alert:states', this.getAllLevelStates(sym));
           } else {
             state.status = 'COMPLETED';
-            logger.info(`Level ${lvl.name} (${sym}) has completed max 2 touches for current period. Locking level.`);
+            logger.info(`Level ${lvl.name} (${sym}) has completed 2 touches for current period. Locking level until next session.`);
             if (this.io) this.io.emit('alert:states', this.getAllLevelStates(sym));
           }
         }
@@ -186,6 +219,7 @@ class AlertService extends EventEmitter {
         state.touchCount = nextTouchCount;
         const reason = `${sym} touched ${lvl.name} (Touch ${nextTouchCount}/2) @ $${currentPrice.toFixed(2)} (Target: $${lvl.target.toFixed(2)}, Tolerance: ±$${tolerance.toFixed(2)})`;
 
+        // Execute alert pipeline asynchronously (non-blocking)
         this.triggerAlertPipeline({
           symbol: sym,
           displayName: marketData.displayName || sym,
@@ -201,6 +235,8 @@ class AlertService extends EventEmitter {
           pivotType: pivot.pivotType,
           pivotTimeframe: pivot.pivotTimeframe,
           touchCount: nextTouchCount
+        }).catch(err => {
+          logger.error(`Alert pipeline error: ${err.message}`);
         });
         break;
       }
@@ -242,19 +278,26 @@ class AlertService extends EventEmitter {
   }
 
   /**
-   * Executes full alert pipeline: Screenshot -> Telegram -> MongoDB -> Socket.IO
+   * Executes full alert pipeline: Fast Socket Broadcast -> Screenshot -> Telegram -> MongoDB
    */
   async triggerAlertPipeline(alertParams) {
     this.isProcessingAlert = true;
 
+    // Safety timeout to prevent isProcessingAlert from ever hanging indefinitely
+    const safetyTimeout = setTimeout(() => {
+      this.isProcessingAlert = false;
+    }, 15000);
+
     try {
-      const sym = (alertParams.symbol || symbolService.getActiveSymbol()).toUpperCase();
+      const sym = (alertParams.symbol || symbolService.getActiveSymbol()).replace(/^.*:/, '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
       const currentTouch = alertParams.touchCount || 1;
+
+
 
       // Update state
       const state = this.getLevelState(sym, alertParams.level);
       
-      // Strict 2-touch lock gate: block live market alerts if level is already locked and touchCount > 2
+      // Strict 2-touch lock gate: block live market alerts if level is already locked
       if (!alertParams.isTest && state && (state.status === 'COMPLETED' || state.status === 'LOCKED') && state.touchCount >= 2) {
         logger.warn(`🛑 Alert suppressed: Level ${alertParams.level} for ${sym} is locked (2/2 touches reached).`);
         return null;
@@ -272,7 +315,37 @@ class AlertService extends EventEmitter {
       const config = pivotService.getConfig(sym);
       const symConfig = symbolService.getSymbol(sym) || symbolService.getActiveSymbolConfig();
 
-      // 1. Generate Real TradingView Screenshot for active symbol with dynamic range and spacing
+      // 1. FAST BROADCAST: Immediately emit to Web & Mobile clients so alarms sound with ZERO delay
+      const tempId = `evt-${Date.now()}`;
+      const earlyEvent = {
+        _id: tempId,
+        id: tempId,
+        symbol: sym,
+        assetType: symConfig?.assetType || 'COMMODITY',
+        exchange: symConfig?.exchange || 'OANDA',
+        currentPrice: alertParams.currentPrice,
+        previousPrice: alertParams.previousPrice,
+        level: alertParams.level,
+        levelPrice: alertParams.levelPrice,
+        direction: alertParams.direction,
+        tolerance: alertParams.tolerance,
+        triggerReason: alertParams.triggerReason,
+        screenshotPath: '',
+        telegramStatus: 'PENDING',
+        isTest: !!alertParams.isTest,
+        timestamp: new Date()
+      };
+
+      if (this.io) {
+        this.io.emit('alert:triggered', {
+          event: earlyEvent,
+          alertStates: this.getAllLevelStates(sym),
+          distances: marketDataService.getMarketData().distances
+        });
+        this.io.emit('alert_triggered', earlyEvent);
+      }
+
+      // 2. Generate Real TradingView Screenshot (with guaranteed touch & Resvg fallback)
       let screenshotData = { filename: '', fullPath: '', relativePath: '', buffer: null };
       try {
         screenshotData = await screenshotService.generateChartScreenshot({
@@ -285,12 +358,12 @@ class AlertService extends EventEmitter {
           timestamp: new Date()
         });
       } catch (screenErr) {
-        logger.error(`Screenshot generation error in alert pipeline: ${screenErr.message}`);
+        logger.error(`Screenshot generation notice in alert pipeline: ${screenErr.message}`);
       }
 
       const screenshotPath = screenshotData.cloudinaryUrl || screenshotData.relativePath || '';
 
-      // 2. Dispatch Telegram Notification with screenshot and touch lock badge
+      // 3. Dispatch Telegram Notification with screenshot
       let telegramResult = { success: false, messageId: null, error: null };
       if (config.telegramAlertsEnabled !== false) {
         try {
@@ -314,7 +387,7 @@ class AlertService extends EventEmitter {
         telegramResult = { success: true, messageId: 'DISABLED', message: 'Telegram alerts disabled in settings' };
       }
 
-      // 3. Persist Event in MongoDB
+      // 4. Persist Event in MongoDB
       let eventDoc = null;
       try {
         eventDoc = await MarketEvent.create({
@@ -342,7 +415,7 @@ class AlertService extends EventEmitter {
       } catch (dbErr) {
         logger.error(`Failed to save MarketEvent to database: ${dbErr.message}`);
         eventDoc = {
-          _id: `temp-${Date.now()}`,
+          _id: tempId,
           symbol: sym,
           currentPrice: alertParams.currentPrice,
           level: alertParams.level,
@@ -356,10 +429,10 @@ class AlertService extends EventEmitter {
         };
       }
 
-      // 4. Enforce strict max 6 records retention
+      // 5. Enforce strict max 6 records retention
       await this.enforceMaxHistory(6);
 
-      // 5. Broadcast to Connected Web & Mobile Socket.IO Clients
+      // 6. Update Connected Clients with finalized event doc (with screenshotPath)
       if (this.io) {
         const payload = {
           event: eventDoc,
@@ -367,15 +440,14 @@ class AlertService extends EventEmitter {
           distances: marketDataService.getMarketData().distances
         };
 
-        // Primary event
         this.io.emit('alert:triggered', payload);
-        // Mobile legacy listener event
         this.io.emit('alert_triggered', eventDoc);
       }
 
       this.emit('alertProcessed', eventDoc);
       return eventDoc;
     } finally {
+      clearTimeout(safetyTimeout);
       this.isProcessingAlert = false;
     }
   }

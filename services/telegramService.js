@@ -84,14 +84,22 @@ ${actionEmoji} <b>ACTION:</b> Price touched <b>${level}</b> level on live chart.
 
     try {
       if (screenshotBufferOrPath) {
-        // Send Photo with Caption
-        const result = await this.sendPhoto(screenshotBufferOrPath, message);
-        logger.telegram(`Telegram photo alert sent successfully! Message ID: ${result?.message_id || 'OK'}`);
-        return { success: true, messageId: result?.message_id, message };
+        // Try Sending Photo with Caption first
+        try {
+          const result = await this.sendPhoto(screenshotBufferOrPath, message);
+          logger.telegram(`Telegram photo alert sent successfully! Message ID: ${result?.message_id || 'OK'}`);
+          return { success: true, messageId: result?.message_id, message };
+        } catch (photoErr) {
+          logger.warn(`Telegram photo dispatch failed (${photoErr.message}), falling back immediately to text alert...`);
+          // Immediate fallback to Text Only to ensure message is NEVER lost
+          const textResult = await this.sendMessage(message);
+          logger.telegram(`Telegram text fallback alert sent successfully! Message ID: ${textResult?.message_id || 'OK'}`);
+          return { success: true, messageId: textResult?.message_id, message };
+        }
       } else {
         // Send Text Only
         const result = await this.sendMessage(message);
-        logger.telegram(`Telegram text alert sent successfully!`);
+        logger.telegram(`Telegram text alert sent successfully! Message ID: ${result?.message_id || 'OK'}`);
         return { success: true, messageId: result?.message_id, message };
       }
     } catch (err) {
@@ -99,12 +107,12 @@ ${actionEmoji} <b>ACTION:</b> Price touched <b>${level}</b> level on live chart.
       const errorMsg = err.response?.data?.description || err.message;
       
       if (statusCode === 401) {
-        logger.error(`Telegram Bot Token is UNAUTHORIZED / INVALID (401). Please verify TELEGRAM_BOT_TOKEN in server/.env or botFather.`);
+        logger.error(`Telegram Bot Token is UNAUTHORIZED / INVALID (401). Please verify TELEGRAM_BOT_TOKEN.`);
       } else if (statusCode === 400 || statusCode === 403) {
         logger.error(`Telegram alert delivery failed (${statusCode}): ${errorMsg}. Please check TELEGRAM_CHAT_ID.`);
       } else {
         logger.error(`Telegram alert delivery failed: ${errorMsg}`);
-        // Only queue for automatic retry if network or transient/rate-limit failure
+        // Queue for retry only if transient network error
         this.queueRetry({ alertData, screenshotBufferOrPath, attempts: 1 });
       }
 
@@ -128,7 +136,7 @@ ${actionEmoji} <b>ACTION:</b> Price touched <b>${level}</b> level on live chart.
 
     const response = await axios.post(`${this.baseUrl}/sendPhoto`, formData, {
       headers: formData.getHeaders(),
-      timeout: 10000
+      timeout: 15000
     });
 
     return response.data?.result;
@@ -143,7 +151,7 @@ ${actionEmoji} <b>ACTION:</b> Price touched <b>${level}</b> level on live chart.
         parse_mode: 'HTML',
         disable_web_page_preview: true
       },
-      { timeout: 8000 }
+      { timeout: 10000 }
     );
     return response.data?.result;
   }
@@ -164,7 +172,9 @@ ${actionEmoji} <b>ACTION:</b> Price touched <b>${level}</b> level on live chart.
       await new Promise(r => setTimeout(r, 4000)); // wait 4 seconds before retry
       try {
         logger.telegram(`Retrying Telegram dispatch (attempt ${item.attempts + 1})...`);
-        await this.sendAlertNotification(item.alertData, item.screenshotBufferOrPath);
+        const message = this.formatAlertMessage(item.alertData);
+        await this.sendMessage(message);
+        logger.telegram(`Telegram retry dispatch succeeded.`);
       } catch (e) {
         if (item.attempts < 3) {
           item.attempts += 1;
@@ -177,7 +187,7 @@ ${actionEmoji} <b>ACTION:</b> Price touched <b>${level}</b> level on live chart.
 
   async testConnection() {
     try {
-      const res = await axios.get(`${this.baseUrl}/getMe`, { timeout: 4000 });
+      const res = await axios.get(`${this.baseUrl}/getMe`, { timeout: 5000 });
       return {
         connected: !!res.data?.ok,
         botInfo: res.data?.result,
@@ -194,3 +204,4 @@ ${actionEmoji} <b>ACTION:</b> Price touched <b>${level}</b> level on live chart.
 }
 
 export const telegramService = new TelegramService();
+

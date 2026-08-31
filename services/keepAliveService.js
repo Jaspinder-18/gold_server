@@ -3,50 +3,58 @@ import { logger } from '../utils/logger.js';
 class KeepAliveService {
   constructor() {
     this.intervalId = null;
-    this.intervalMs = 13 * 60 * 1000; // Exactly 13 minutes (780,000 ms)
+    this.intervalMs = 5 * 60 * 1000; // 5 minutes (prevents 15m Render free-tier idle sleep)
     this.isRunning = false;
   }
 
   /**
-   * Resolve target ping URL using environment variable BACKEND_URL,
-   * RENDER_EXTERNAL_URL (standard on Render), or fallback to local address.
+   * Resolve target ping URLs for both Backend API and Frontend Client
    */
-  getTargetUrl(port = 5001) {
-    const rawUrl = process.env.BACKEND_URL || process.env.RENDER_EXTERNAL_URL || `http://localhost:${port}`;
-    const cleanUrl = rawUrl.replace(/\/+$/, '');
-    return `${cleanUrl}/api/health`;
+  getTargetUrls(port = 5001) {
+    const defaultBackend = 'https://gold-server-dbbq.onrender.com';
+    const rawBackendUrl = process.env.BACKEND_URL || process.env.RENDER_EXTERNAL_URL || defaultBackend;
+    const cleanBackend = rawBackendUrl.replace(/\/+$/, '');
+
+    const defaultFrontend = 'https://gold-client.onrender.com';
+    const rawFrontendUrl = process.env.FRONTEND_URL || defaultFrontend;
+    const cleanFrontend = rawFrontendUrl.replace(/\/+$/, '');
+
+    return [
+      `${cleanBackend}/api/health`,
+      cleanFrontend.startsWith('http') ? cleanFrontend : null
+    ].filter(Boolean);
   }
 
   /**
-   * Execute lightweight keep-alive ping
+   * Execute lightweight keep-alive ping to keep Render services awake
    */
   async ping(port) {
-    const url = this.getTargetUrl(port);
-    try {
-      logger.info(`Keep-alive request sent: ${url}`);
+    const urls = this.getTargetUrls(port);
+    for (const url of urls) {
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 12000); // 12-second safety timeout
 
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000); // 15-second safety timeout
+        const response = await fetch(url, {
+          method: 'GET',
+          headers: {
+            'User-Agent': 'Render-KeepAlive-Worker/2.0',
+            'Accept': 'application/json, text/html'
+          },
+          signal: controller.signal
+        });
 
-      const response = await fetch(url, {
-        method: 'GET',
-        headers: {
-          'User-Agent': 'Render-KeepAlive-Worker/1.0',
-          'Accept': 'application/json'
-        },
-        signal: controller.signal
-      });
+        clearTimeout(timeoutId);
 
-      clearTimeout(timeoutId);
-
-      if (response.ok) {
-        logger.info(`Keep-alive response: ${response.status}`);
-      } else {
-        logger.warn(`Keep-alive response: ${response.status}`);
+        if (response.ok) {
+          logger.info(`⚡ Keep-alive ping OK (${response.status}): ${url}`);
+        } else {
+          logger.warn(`Keep-alive ping returned ${response.status}: ${url}`);
+        }
+      } catch (err) {
+        // Log safely without interrupting server operation
+        logger.warn(`Keep-alive ping notice for ${url}: ${err.message}`);
       }
-    } catch (err) {
-      // Log error safely without crashing or restarting the application
-      logger.error(`Keep-alive request failed: ${err.message}`);
     }
   }
 
@@ -57,18 +65,18 @@ class KeepAliveService {
     if (this.isRunning) return;
     this.isRunning = true;
 
-    const url = this.getTargetUrl(port);
-    logger.info(`🕒 Keep-alive service active. Automatically pinging every 13 minutes: ${url}`);
+    const urls = this.getTargetUrls(port);
+    logger.info(`🕒 Keep-alive service active. Automatically pinging every 5 minutes: ${urls.join(' & ')}`);
 
-    // Schedule automated periodic ping every 13 minutes
+    // Schedule automated periodic ping every 5 minutes
     this.intervalId = setInterval(() => {
       this.ping(port);
     }, this.intervalMs);
 
-    // Initial check after 30 seconds to verify server readiness
+    // Initial ping after 15 seconds to establish connection
     setTimeout(() => {
       this.ping(port);
-    }, 30000);
+    }, 15000);
   }
 
   /**
@@ -85,3 +93,4 @@ class KeepAliveService {
 }
 
 export const keepAliveService = new KeepAliveService();
+

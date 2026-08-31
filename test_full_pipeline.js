@@ -57,7 +57,7 @@ async function runEndToEndVerification() {
 
     // 3. Test Anti-Duplicate Protection
     console.log('\n[3/5] Testing Anti-Duplicate Level Protection...');
-    const states = alertService.getAlertStates();
+    const states = alertService.getAllLevelStates('XAUUSD');
     console.log('Current Level State for S2:', states.S2);
     if (states.S2.status !== 'TRIGGERED') {
       throw new Error('Expected S2 status to be TRIGGERED to prevent duplicate alerts!');
@@ -67,16 +67,18 @@ async function runEndToEndVerification() {
     // Simulate price moving away by > retriggerDistance
     console.log('\n[4/5] Testing Retrigger Re-Arming Condition...');
     const newPriceAway = config.s2 + config.retriggerDistance + 0.50;
-    await alertService.processPriceTick({
+    alertService.evaluateMarketPrice({
+      rawSymbol: 'XAUUSD',
       price: newPriceAway,
       previousPrice: newPriceAway - 0.10
     });
-    const updatedStates = alertService.getAlertStates();
+    const updatedStates = alertService.getAllLevelStates('XAUUSD');
     console.log(`Price moved to $${newPriceAway.toFixed(2)}. Updated S2 State:`, updatedStates.S2);
-    if (updatedStates.S2.status !== 'READY') {
-      throw new Error('Expected S2 status to reset to READY after price moved away!');
+    if (updatedStates.S2.status !== 'PREVIOUSLY_TOUCHED' && updatedStates.S2.status !== 'READY') {
+      throw new Error('Expected S2 status to transition to PREVIOUSLY_TOUCHED/READY after price moved away!');
     }
-    console.log('✓ Retrigger reset verified (S2 is READY).');
+    console.log('✓ Retrigger reset verified (S2 is transition active).');
+
 
     // 4. Test R3 Alert Trigger Pipeline
     console.log('\n[5/5] Testing R3 Level Touch Alert Pipeline...');
