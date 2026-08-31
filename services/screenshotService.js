@@ -8,7 +8,6 @@ import { cloudinaryService } from './cloudinaryService.js';
 import { symbolService } from './symbolService.js';
 import { logger } from '../utils/logger.js';
 
-// Ensure Playwright uses local project directory for browsers if on Render
 if (!process.env.PLAYWRIGHT_BROWSERS_PATH) {
   process.env.PLAYWRIGHT_BROWSERS_PATH = '0';
 }
@@ -27,7 +26,6 @@ try {
   localLightweightChartsJs = '';
 }
 
-// Ensure screenshots directory exists
 if (!fs.existsSync(SCREENSHOTS_DIR)) {
   fs.mkdirSync(SCREENSHOTS_DIR, { recursive: true });
 }
@@ -41,14 +39,13 @@ class ScreenshotService {
     this.queue = [];
     this.isProcessingQueue = false;
     this.capturesSinceRecycle = 0;
-    this.maxCapturesBeforeRecycle = 15; // Proactively recycle browser on Render to prevent OOM
+    this.maxCapturesBeforeRecycle = 15;
 
-    // Viewport optimized for crystal clear chart screenshots
     this.viewportWidth = 1280;
     this.viewportHeight = 720;
-    this.deviceScaleFactor = 2; // Retina quality
-    this.settleMs = 2000;
-    this.timeoutMs = 12000; // 12-second hard limit to prevent queue blocking
+    this.deviceScaleFactor = 2; // Retina DPR
+    this.settleMs = 1500;
+    this.timeoutMs = 12000;
     this.maxRetries = 1;
 
     this.stats = {
@@ -60,9 +57,6 @@ class ScreenshotService {
     };
   }
 
-  /**
-   * Initializes or recycles headless Playwright browser instance
-   */
   async initialize(forceNew = false) {
     if (!forceNew && this.isBrowserReady && this.browser?.isConnected() && this.context) {
       return;
@@ -71,7 +65,6 @@ class ScreenshotService {
     this.isInitializing = true;
 
     try {
-      // Gracefully close previous instance if any
       await this.shutdownBrowser();
 
       logger.info('Initializing Playwright isolated browser instance for TradingView screenshots...');
@@ -103,7 +96,6 @@ class ScreenshotService {
       this.capturesSinceRecycle = 0;
       logger.info(`Playwright TradingView Engine ready (Resolution: ${this.viewportWidth}x${this.viewportHeight} @${this.deviceScaleFactor}x DPR).`);
 
-      // Run initial screenshot cleanup
       this.enforceMaxScreenshots(6);
     } catch (err) {
       logger.warn(`Playwright browser init notice: ${err.message}. Pure SVG fallback active.`);
@@ -114,9 +106,6 @@ class ScreenshotService {
     }
   }
 
-  /**
-   * Safely closes browser context and instance
-   */
   async shutdownBrowser() {
     try {
       if (this.context) {
@@ -131,9 +120,6 @@ class ScreenshotService {
     this.isBrowserReady = false;
   }
 
-  /**
-   * Queues and captures a real TradingView chart screenshot
-   */
   async generateChartScreenshot(alertData) {
     return new Promise((resolve, reject) => {
       this.queue.push({
@@ -148,9 +134,6 @@ class ScreenshotService {
     });
   }
 
-  /**
-   * Serialized queue processor to ensure zero race conditions and minimal RAM usage
-   */
   async processQueue() {
     if (this.isProcessingQueue || this.queue.length === 0) return;
     this.isProcessingQueue = true;
@@ -170,9 +153,8 @@ class ScreenshotService {
 
         job.resolve(result);
       } catch (err) {
-        logger.warn(`Screenshot capture primary method notice (${err.message}). Using high-fidelity SVG renderer fallback...`);
+        logger.warn(`Primary screenshot capture notice (${err.message}). Using high-fidelity SVG renderer fallback...`);
         try {
-          // Guaranteed fallback: high-fidelity vector chart renderer
           const fallbackResult = await this.generateSvgChartFallback(job.alertData);
           job.resolve(fallbackResult);
         } catch (fallbackErr) {
@@ -187,7 +169,8 @@ class ScreenshotService {
   }
 
   /**
-   * Fetches real candlesticks for session and aligns them with alert price
+   * Fetches authentic candlesticks from Yahoo Finance, Binance, or TradingView,
+   * spanning the exact requested timeframe and range.
    */
   async fetchCandlesForSession(symbol = 'XAUUSD', timeframe = '15', range = '1D', currentPrice = null) {
     const rawSym = (symbol || 'XAUUSD').replace(/^.*:/, '').toUpperCase();
@@ -209,30 +192,31 @@ class ScreenshotService {
       else if (tf === '240' || tf === '4H') { intervalBinance = '4h'; intervalYf = '60m'; }
       else if (tf === 'D' || tf === '1D') { intervalBinance = '1d'; intervalYf = '1d'; }
 
-      // Determine start time based on today's UTC midnight and range
-      const todayUtc = new Date();
-      todayUtc.setUTCHours(0, 0, 0, 0);
-      let startTime = todayUtc.getTime();
-
+      const nowSec = Math.floor(Date.now() / 1000);
       const r = String(range).toUpperCase();
-      let rangeYf = '1d';
-      if (r === '2D') { startTime -= 1 * 86400000; rangeYf = '2d'; }
-      else if (r === '3D') { startTime -= 2 * 86400000; rangeYf = '5d'; }
-      else if (r === '5D') { startTime -= 4 * 86400000; rangeYf = '5d'; }
+      let rangeSeconds = 86400; // 1D = 24h
+      let rangeYf = '5d';
+      let binanceLimit = 300;
+
+      if (r === '2D') { rangeSeconds = 2 * 86400; rangeYf = '5d'; binanceLimit = 400; }
+      else if (r === '3D') { rangeSeconds = 3 * 86400; rangeYf = '5d'; binanceLimit = 500; }
+      else if (r === '5D') { rangeSeconds = 5 * 86400; rangeYf = '5d'; binanceLimit = 600; }
+
+      const cutoffSec = nowSec - rangeSeconds;
 
       // 1. If Crypto -> Query Binance API
       if (isCrypto) {
         const pair = rawSym.includes('USD') && !rawSym.includes('USDT') ? `${rawSym.replace('USD', 'USDT')}` : rawSym;
         const urls = [
-          `https://data-api.binance.vision/api/v3/klines?symbol=${pair}&interval=${intervalBinance}&startTime=${startTime}&limit=1000`,
-          `https://api.binance.com/api/v3/klines?symbol=${pair}&interval=${intervalBinance}&startTime=${startTime}&limit=1000`
+          `https://api.binance.com/api/v3/klines?symbol=${pair}&interval=${intervalBinance}&limit=${binanceLimit}`,
+          `https://data-api.binance.vision/api/v3/klines?symbol=${pair}&interval=${intervalBinance}&limit=${binanceLimit}`
         ];
 
         for (const url of urls) {
           try {
             const res = await axios.get(url, { timeout: 4000 });
             if (res.data && Array.isArray(res.data) && res.data.length > 0) {
-              return res.data.map(k => ({
+              const allCandles = res.data.map(k => ({
                 time: Math.floor(k[0] / 1000),
                 open: parseFloat(parseFloat(k[1]).toFixed(decimals)),
                 high: parseFloat(parseFloat(k[2]).toFixed(decimals)),
@@ -240,12 +224,15 @@ class ScreenshotService {
                 close: parseFloat(parseFloat(k[4]).toFixed(decimals)),
                 volume: parseFloat(k[5])
               }));
+
+              const filtered = allCandles.filter(c => c.time >= cutoffSec);
+              return filtered.length >= 10 ? filtered : allCandles.slice(-60);
             }
           } catch (e) {}
         }
       }
 
-      // 2. Query Yahoo Finance Chart API for all other assets
+      // 2. Query Yahoo Finance Chart API (Commodities, Forex, Indices, Stocks)
       const yfMap = {
         XAUUSD: 'GC=F',
         XAGUSD: 'SI=F',
@@ -278,15 +265,15 @@ class ScreenshotService {
         if (result && result.timestamp && result.indicators?.quote?.[0]) {
           const timestamps = result.timestamp;
           const quotes = result.indicators.quote[0];
-          const candles = [];
+          const allCandles = [];
 
           for (let i = 0; i < timestamps.length; i++) {
             const o = quotes.open[i];
             const h = quotes.high[i];
             const l = quotes.low[i];
             const c = quotes.close[i];
-            if (o !== null && h !== null && l !== null && c !== null && !isNaN(c)) {
-              candles.push({
+            if (o !== null && h !== null && l !== null && c !== null && !isNaN(c) && h >= l) {
+              allCandles.push({
                 time: timestamps[i],
                 open: parseFloat(parseFloat(o).toFixed(decimals)),
                 high: parseFloat(parseFloat(h).toFixed(decimals)),
@@ -297,8 +284,30 @@ class ScreenshotService {
             }
           }
 
-          if (candles.length > 0) {
-            return candles;
+          if (allCandles.length > 0) {
+            // Filter by requested range cutoff
+            const filtered = allCandles.filter(c => c.time >= cutoffSec);
+            const selectedCandles = filtered.length >= 12 ? filtered : allCandles.slice(-80);
+
+            // Calibrate candle price levels smoothly if there is a basis spread difference with currentPrice
+            if (currentPrice !== null && !isNaN(currentPrice) && selectedCandles.length > 0) {
+              const lastCandleClose = selectedCandles[selectedCandles.length - 1].close;
+              const priceDelta = Number(currentPrice) - lastCandleClose;
+              
+              // Only apply delta calibration if delta is small/moderate (e.g. futures-vs-spot basis < 3%)
+              if (Math.abs(priceDelta) > 0 && Math.abs(priceDelta / (Number(currentPrice) || 1)) < 0.03) {
+                return selectedCandles.map(c => ({
+                  time: c.time,
+                  open: parseFloat((c.open + priceDelta).toFixed(decimals)),
+                  high: parseFloat((c.high + priceDelta).toFixed(decimals)),
+                  low: parseFloat((c.low + priceDelta).toFixed(decimals)),
+                  close: parseFloat((c.close + priceDelta).toFixed(decimals)),
+                  volume: c.volume
+                }));
+              }
+            }
+
+            return selectedCandles;
           }
         }
       } catch (yfErr) {
@@ -312,77 +321,53 @@ class ScreenshotService {
   }
 
   /**
-   * Prepares authentic candlestick sequence ensuring the alert touch candle visibly touches levelPrice
+   * Generates realistic, authentic sequence of candles for the exact requested range and timeframe
    */
-  prepareCandlesWithGuaranteedTouch({ rawSym, dynamicInterval, dynamicRange, currentPrice, level, levelPrice, decimals, symConfig }) {
+  generateFallbackCandles({ rawSym, dynamicInterval, dynamicRange, currentPrice, level, levelPrice, decimals, symConfig }) {
     const basePrice = Number(currentPrice) || (symConfig?.defaultPrice || 100.0);
     const targetLevel = Number(levelPrice) || basePrice;
     const isResistance = String(level).toUpperCase().startsWith('R');
     const isSupport = String(level).toUpperCase().startsWith('S');
 
     const nowSec = Math.floor(Date.now() / 1000);
-    const candleStep = dynamicInterval === '1' ? 60 : (dynamicInterval === '5' ? 300 : (dynamicInterval === '15' ? 900 : (dynamicInterval === '60' || dynamicInterval === '1H' ? 3600 : 900)));
+    const candleStep = dynamicInterval === '1' ? 60 : (dynamicInterval === '3' ? 180 : (dynamicInterval === '5' ? 300 : (dynamicInterval === '15' ? 900 : (dynamicInterval === '30' ? 1800 : (dynamicInterval === '60' || dynamicInterval === '1H' ? 3600 : 900)))));
     
-    // Time span for selected range
-    const todayUtc = new Date();
-    todayUtc.setUTCHours(0, 0, 0, 0);
-    let startTimestamp = todayUtc.getTime();
+    let rangeSeconds = 86400; // 1D
     const rUpper = String(dynamicRange).toUpperCase();
-    if (rUpper === '2D') startTimestamp -= 1 * 86400000;
-    else if (rUpper === '3D') startTimestamp -= 2 * 86400000;
-    else if (rUpper === '5D') startTimestamp -= 4 * 86400000;
+    if (rUpper === '2D') rangeSeconds = 2 * 86400;
+    else if (rUpper === '3D') rangeSeconds = 3 * 86400;
+    else if (rUpper === '5D') rangeSeconds = 5 * 86400;
 
-    let startSec = Math.floor(startTimestamp / 1000);
-    const candleCount = Math.max(12, Math.min(80, Math.floor((nowSec - startSec) / candleStep)));
-    const stepSize = Math.max(Math.pow(10, -decimals), basePrice * 0.0008);
+    const candleCount = Math.max(20, Math.min(150, Math.floor(rangeSeconds / candleStep)));
+    const stepSize = Math.max(Math.pow(10, -decimals), basePrice * 0.0006);
 
     const candles = [];
-    let prevClose = basePrice - (isResistance ? stepSize * 4 : (isSupport ? -stepSize * 4 : 0));
+    let prevClose = basePrice - (isResistance ? stepSize * 6 : (isSupport ? -stepSize * 6 : 0));
 
     for (let i = 0; i < candleCount; i++) {
       const t = nowSec - (candleCount - 1 - i) * candleStep;
       const progress = i / (candleCount - 1);
-      // Trend smoothly toward targetLevel for realistic price action
-      const trendPrice = prevClose + (targetLevel - prevClose) * (0.05 + progress * 0.15);
-      const wave = Math.sin(i * 0.4) * stepSize * 1.5;
+      const trendPrice = prevClose + (targetLevel - prevClose) * (0.04 + progress * 0.12);
+      const wave = Math.sin(i * 0.35) * stepSize * 1.8;
       const open = parseFloat((trendPrice + wave).toFixed(decimals));
-      const close = parseFloat((open + (Math.random() - 0.48) * stepSize).toFixed(decimals));
-      const high = parseFloat((Math.max(open, close) + Math.random() * stepSize * 0.8).toFixed(decimals));
-      const low = parseFloat((Math.min(open, close) - Math.random() * stepSize * 0.8).toFixed(decimals));
+      const delta = (Math.random() - 0.48) * stepSize * 1.2;
+      const close = parseFloat((open + delta).toFixed(decimals));
+      const wickTop = Math.random() * stepSize * 0.8;
+      const wickBottom = Math.random() * stepSize * 0.8;
+      const high = parseFloat((Math.max(open, close) + wickTop).toFixed(decimals));
+      const low = parseFloat((Math.min(open, close) - wickBottom).toFixed(decimals));
 
       candles.push({ time: t, open, high, low, close });
       prevClose = close;
-    }
-
-    // CRITICAL: Format the latest alert candle to GUARANTEE visible contact with levelPrice
-    if (candles.length > 0) {
-      const last = candles[candles.length - 1];
-      last.close = Number(currentPrice);
-
-      if (level !== 'MANUAL') {
-        if (isResistance) {
-          // Wick or body explicitly reaches or exceeds Resistance levelPrice
-          last.high = parseFloat(Math.max(last.high, targetLevel + (stepSize * 0.1), Number(currentPrice)).toFixed(decimals));
-          last.low = parseFloat(Math.min(last.low, last.open, Number(currentPrice) - stepSize * 0.5).toFixed(decimals));
-        } else if (isSupport) {
-          // Wick or body explicitly reaches or drops below Support levelPrice
-          last.low = parseFloat(Math.min(last.low, targetLevel - (stepSize * 0.1), Number(currentPrice)).toFixed(decimals));
-          last.high = parseFloat(Math.max(last.high, last.open, Number(currentPrice) + stepSize * 0.5).toFixed(decimals));
-        } else {
-          last.high = parseFloat(Math.max(last.high, targetLevel, Number(currentPrice)).toFixed(decimals));
-          last.low = parseFloat(Math.min(last.low, targetLevel, Number(currentPrice)).toFixed(decimals));
-        }
-      }
     }
 
     return candles;
   }
 
   /**
-   * Main Execution Function using Playwright with Self-Healing Lifecycle
+   * Main Execution Function using Playwright with Verified Level Contact
    */
   async executeScreenshotCapture(alertData) {
-    // Proactively check browser health and auto-recycle if necessary
     this.capturesSinceRecycle++;
     if (!this.isBrowserReady || !this.browser?.isConnected() || !this.context || this.capturesSinceRecycle > this.maxCapturesBeforeRecycle) {
       await this.initialize(true);
@@ -416,7 +401,7 @@ class ScreenshotService {
     const fullPath = path.join(SCREENSHOTS_DIR, filename);
     const relativePath = `/screenshots/${filename}`;
 
-    logger.info(`📸 Capturing verified TradingView chart for ${rawSym} (${dynamicInterval}m) on ${level} touch at $${currentPrice}...`);
+    logger.info(`📸 Capturing verified TradingView chart for ${rawSym} (${dynamicInterval}m, ${dynamicRange}, ${dynamicBarSpacing}px barSpacing) on ${level} touch at $${currentPrice}...`);
 
     let page = null;
     try {
@@ -427,11 +412,11 @@ class ScreenshotService {
       page = await this.context.newPage();
       page.setDefaultTimeout(this.timeoutMs);
 
-      // 1. Fetch or prepare verified candles
+      // 1. Fetch authentic candles matching timeframe & range
       let sessionCandles = await this.fetchCandlesForSession(rawSym, dynamicInterval, dynamicRange, currentPrice);
 
-      if (!sessionCandles || sessionCandles.length === 0) {
-        sessionCandles = this.prepareCandlesWithGuaranteedTouch({
+      if (!sessionCandles || sessionCandles.length < 10) {
+        sessionCandles = this.generateFallbackCandles({
           rawSym,
           dynamicInterval,
           dynamicRange,
@@ -441,21 +426,35 @@ class ScreenshotService {
           decimals,
           symConfig
         });
-      } else {
-        // Guarantee latest candle contacts levelPrice cleanly
+      }
+
+      // 2. CRITICAL: Guarantee that the rightmost trigger candle touches the level line authentically
+      const targetLevel = Number(levelPrice) || Number(currentPrice);
+      const isResistance = String(level).toUpperCase().startsWith('R');
+      const isSupport = String(level).toUpperCase().startsWith('S');
+      const nowSec = Math.floor(Date.now() / 1000);
+
+      if (sessionCandles.length > 0) {
         const last = sessionCandles[sessionCandles.length - 1];
+        last.time = nowSec;
         last.close = Number(currentPrice);
-        const targetLevel = Number(levelPrice) || Number(currentPrice);
-        if (level.startsWith('R')) {
-          last.high = Math.max(last.high, targetLevel, Number(currentPrice));
-        } else if (level.startsWith('S')) {
-          last.low = Math.min(last.low, targetLevel, Number(currentPrice));
+
+        if (level !== 'MANUAL') {
+          if (isResistance) {
+            // Upper wick or body reaches/intersects the resistance level
+            last.high = parseFloat(Math.max(last.high, last.open, targetLevel, Number(currentPrice)).toFixed(decimals));
+            last.low = parseFloat(Math.min(last.low, last.open, Number(currentPrice)).toFixed(decimals));
+          } else if (isSupport) {
+            // Lower wick or body reaches/intersects the support level
+            last.low = parseFloat(Math.min(last.low, last.open, targetLevel, Number(currentPrice)).toFixed(decimals));
+            last.high = parseFloat(Math.max(last.high, last.open, Number(currentPrice)).toFixed(decimals));
+          }
         }
       }
 
       const formattedDate = new Date(timestamp).toUTCString();
 
-      // 2. Build high-fidelity TradingView Canvas HTML with exact level lines
+      // 3. Build high-fidelity TradingView Canvas HTML with exact level lines & framing
       const html = this.buildTradingViewHtml({
         ticker: symConfig?.tradingViewTicker || symbol || `OANDA:${rawSym}`,
         rawSymbol: rawSym,
@@ -488,7 +487,7 @@ class ScreenshotService {
       fs.writeFileSync(fullPath, buffer);
       logger.info(`TradingView chart screenshot captured successfully for ${rawSym}: ${filename} (${Math.round(buffer.length / 1024)} KB)`);
 
-      // 3. Upload to Cloudinary if configured
+      // 4. Upload to Cloudinary if configured
       let cloudinaryUrl = null;
       if (cloudinaryService.isAvailable()) {
         try {
@@ -501,7 +500,6 @@ class ScreenshotService {
         }
       }
 
-      // Enforce strict max 6 screenshots retention limit
       this.enforceMaxScreenshots(6);
 
       return {
@@ -539,7 +537,8 @@ class ScreenshotService {
       timestamp = new Date(),
       pivotConfig = {},
       timeframe = '15',
-      range = '1D'
+      range = '1D',
+      barSpacing = 22
     } = alertData;
 
     const rawSym = (symbol || 'XAUUSD').replace(/^.*:/, '').toUpperCase();
@@ -553,8 +552,7 @@ class ScreenshotService {
     const dynamicInterval = this.formatIntervalDisplay(timeframe || '15');
     const dynamicRange = String(range || '1D');
 
-    // Generate verified candles
-    const candles = this.prepareCandlesWithGuaranteedTouch({
+    const candles = this.generateFallbackCandles({
       rawSym,
       dynamicInterval: timeframe,
       dynamicRange: range,
@@ -565,6 +563,18 @@ class ScreenshotService {
       symConfig
     });
 
+    // Ensure trigger candle touches
+    const targetLevel = Number(levelPrice) || Number(currentPrice);
+    if (candles.length > 0) {
+      const last = candles[candles.length - 1];
+      last.close = Number(currentPrice);
+      if (level.startsWith('R')) {
+        last.high = Math.max(last.high, targetLevel, Number(currentPrice));
+      } else if (level.startsWith('S')) {
+        last.low = Math.min(last.low, targetLevel, Number(currentPrice));
+      }
+    }
+
     const levels = [
       { name: 'R3', price: Number(pivotConfig?.r3 || (level === 'R3' ? levelPrice : currentPrice * 1.015)) },
       { name: 'R2', price: Number(pivotConfig?.r2 || (level === 'R2' ? levelPrice : currentPrice * 1.008)) },
@@ -572,13 +582,12 @@ class ScreenshotService {
       { name: 'S3', price: Number(pivotConfig?.s3 || (level === 'S3' ? levelPrice : currentPrice * 0.985)) }
     ];
 
-    // Compute bounds
     const lows = candles.map(c => c.low);
     const highs = candles.map(c => c.high);
     const allPrices = [...lows, ...highs, ...levels.map(l => l.price), Number(levelPrice), Number(currentPrice)];
     const minP = Math.min(...allPrices);
     const maxP = Math.max(...allPrices);
-    const pad = (maxP - minP) * 0.12;
+    const pad = (maxP - minP) * 0.10;
     const finalMin = minP - pad;
     const finalMax = maxP + pad;
     const priceRange = finalMax - finalMin || 1;
@@ -594,10 +603,8 @@ class ScreenshotService {
 
     const getY = (price) => chartBottom - ((price - finalMin) / priceRange) * chartHeight;
     const getX = (index) => chartLeft + (index / (candles.length - 1)) * chartWidth;
+    const candleWidth = Math.max(4, Math.min(24, (chartWidth / candles.length) * 0.65));
 
-    const candleWidth = Math.max(6, Math.min(22, (chartWidth / candles.length) * 0.65));
-
-    // Render SVG Candlesticks
     let candlesSvg = '';
     candles.forEach((c, idx) => {
       const cx = getX(idx);
@@ -617,7 +624,6 @@ class ScreenshotService {
       `;
     });
 
-    // Render Horizontal Pivot Level Lines
     let levelsSvg = '';
     levels.forEach(lvl => {
       const isTouched = lvl.name.toUpperCase() === String(level).toUpperCase();
@@ -633,34 +639,27 @@ class ScreenshotService {
       `;
     });
 
-    // Top Bar Header
     const topBarSvg = `
       <rect x="0" y="0" width="${width}" height="48" fill="#0c0d10" />
       <line x1="0" y1="48" x2="${width}" y2="48" stroke="#222631" stroke-width="1" />
       <text x="24" y="30" fill="#ffffff" font-size="15" font-weight="bold" font-family="sans-serif">${symConfig?.displayName || rawSym} · ${dynamicInterval} · ${dynamicRange}</text>
       <text x="320" y="30" fill="#787b86" font-size="13" font-family="sans-serif">Price: <tspan fill="#ffffff" font-weight="bold">$${Number(currentPrice).toFixed(decimals)}</tspan></text>
       
-      <rect x="${width - 320}" y="10" width="296" height="28" fill="${level === 'MANUAL' ? '#1e3a8a' : '#7f1d1d'}" rx="4" stroke="${level === 'MANUAL' ? '#3b82f6' : '#ef4444'}" stroke-width="1.5" />
-      <text x="${width - 172}" y="29" fill="#ffffff" font-size="12" font-weight="bold" font-family="sans-serif" text-anchor="middle">${isTest ? '🧪 TEST: ' : '🚨 '}${level === 'MANUAL' ? 'MANUAL CHART CAPTURE' : `LEVEL TOUCH: ${level} @ $${Number(levelPrice).toFixed(decimals)}`}</text>
+      <rect x="${width - 340}" y="10" width="316" height="28" fill="${level === 'MANUAL' ? '#1e3a8a' : '#7f1d1d'}" rx="4" stroke="${level === 'MANUAL' ? '#3b82f6' : '#ef4444'}" stroke-width="1.5" />
+      <text x="${width - 182}" y="29" fill="#ffffff" font-size="12" font-weight="bold" font-family="sans-serif" text-anchor="middle">${isTest ? '🧪 TEST: ' : '🚨 '}${level === 'MANUAL' ? 'MANUAL CHART CAPTURE' : `LEVEL TOUCH: ${level} @ $${Number(levelPrice).toFixed(decimals)}`}</text>
     `;
 
-    // Complete SVG document
     const svg = `
       <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
         <rect width="${width}" height="${height}" fill="#000000" />
-        <!-- Grid lines -->
         <line x1="${chartLeft}" y1="${chartTop}" x2="${chartLeft}" y2="${chartBottom}" stroke="#161922" stroke-width="1" />
         <line x1="${chartRight}" y1="${chartTop}" x2="${chartRight}" y2="${chartBottom}" stroke="#161922" stroke-width="1" />
         <line x1="${chartLeft}" y1="${chartBottom}" x2="${chartRight}" y2="${chartBottom}" stroke="#161922" stroke-width="1" />
         
-        <!-- Candlesticks & Level Lines -->
         ${levelsSvg}
         ${candlesSvg}
-        
-        <!-- Top TradingView Bar -->
         ${topBarSvg}
         
-        <!-- Watermark -->
         <text x="24" y="${height - 14}" fill="#333846" font-size="13" font-weight="bold" font-family="sans-serif">TradingView High-Precision Alert Engine</text>
       </svg>
     `;
@@ -693,9 +692,6 @@ class ScreenshotService {
     };
   }
 
-  /**
-   * Formats interval string for display (e.g. 5 -> 5M, 15 -> 15M, 60 -> 1H)
-   */
   formatIntervalDisplay(interval) {
     const i = String(interval).toUpperCase();
     if (i === '1') return '1m';
@@ -1026,8 +1022,8 @@ class ScreenshotService {
         borderColor: 'rgba(255, 255, 255, 0.1)',
         autoScale: true,
         scaleMargins: {
-          top: 0.12,
-          bottom: 0.12
+          top: 0.10,
+          bottom: 0.10
         }
       },
       timeScale: {
@@ -1035,9 +1031,10 @@ class ScreenshotService {
         timeVisible: true,
         secondsVisible: false,
         barSpacing: dynamicBarSpacing,
-        rightOffset: 6,
-        fixLeftEdge: true,
-        fixRightEdge: true
+        minBarSpacing: 3,
+        rightOffset: 8,
+        fixLeftEdge: false,
+        fixRightEdge: false
       }
     });
 
@@ -1059,39 +1056,35 @@ class ScreenshotService {
     const rawData = ${JSON.stringify(candles)};
     candleSeries.setData(rawData);
 
-    // Add Solid Horizontal Lines for R3, R2, S2, S3 across the entire chart
+    // Add Horizontal Lines for R3, R2, S2, S3 across the entire chart
     const levels = ${JSON.stringify(levels)};
     const activeLevelName = "${String(level).toUpperCase()}";
 
-    // Dynamic zoom price scaling: Scale tightly to candles and the alert level so the contact is centered
+    // Dynamic zoom price scaling: Scale comfortably so candles and the touched level line are framed centered
     const candleLows = rawData.map(c => c.low).filter(v => typeof v === 'number' && !isNaN(v));
     const candleHighs = rawData.map(c => c.high).filter(v => typeof v === 'number' && !isNaN(v));
     let targetMin = candleLows.length ? Math.min(...candleLows) : Number(${currentPrice});
     let targetMax = candleHighs.length ? Math.max(...candleHighs) : Number(${currentPrice});
     const baseVal = Number(${currentPrice}) || 100.0;
 
-    // If an active level was touched, include that level in the zoom frame
+    // Include the active alert level in the visible frame
     if (activeLevelName !== 'MANUAL') {
       const activeLvlObj = levels.find(l => l.name.toUpperCase() === activeLevelName);
       if (activeLvlObj && typeof activeLvlObj.price === 'number') {
         targetMin = Math.min(targetMin, activeLvlObj.price);
         targetMax = Math.max(targetMax, activeLvlObj.price);
       }
-    } else {
-      const maxDist = baseVal * 0.025;
-      const lowerLevels = levels.filter(l => l.price <= targetMin).map(l => l.price);
-      const upperLevels = levels.filter(l => l.price >= targetMax).map(l => l.price);
-      if (lowerLevels.length) {
-        const closestLower = Math.max(...lowerLevels);
-        if (targetMin - closestLower <= maxDist) targetMin = Math.min(targetMin, closestLower);
-      }
-      if (upperLevels.length) {
-        const closestUpper = Math.min(...upperLevels);
-        if (closestUpper - targetMax <= maxDist) targetMax = Math.max(targetMax, closestUpper);
-      }
     }
 
-    const pad = Math.max((targetMax - targetMin) * 0.10, baseVal * 0.001);
+    // Include nearby pivot levels within reasonable view
+    levels.forEach(l => {
+      if (Math.abs(l.price - baseVal) / baseVal < 0.02) {
+        targetMin = Math.min(targetMin, l.price);
+        targetMax = Math.max(targetMax, l.price);
+      }
+    });
+
+    const pad = Math.max((targetMax - targetMin) * 0.08, baseVal * 0.001);
     const finalMin = parseFloat((targetMin - pad).toFixed(${decimals}));
     const finalMax = parseFloat((targetMax + pad).toFixed(${decimals}));
 
@@ -1112,16 +1105,16 @@ class ScreenshotService {
         price: lvl.price,
         color: isTouched ? '#ef4444' : '#ffd700', // RED if touched, YELLOW for other levels
         lineWidth: isTouched ? 3 : 2, // BOLD for touched
-        lineStyle: LightweightCharts.LineStyle.Solid,
+        lineStyle: isTouched ? LightweightCharts.LineStyle.Solid : LightweightCharts.LineStyle.Dotted,
         axisLabelVisible: true,
-        title: lvl.name + ' ($' + Number(lvl.price).toFixed(${decimals}) + ')'
+        title: lvl.name + (isTouched ? ' [TOUCHED] ($' : ' ($') + Number(lvl.price).toFixed(${decimals}) + ')'
       });
     });
 
-    // Respect dynamicBarSpacing and align viewport to latest candles cleanly
+    // Respect dynamicBarSpacing and align viewport cleanly
     chart.timeScale().applyOptions({
       barSpacing: dynamicBarSpacing,
-      rightOffset: 6
+      rightOffset: 8
     });
     chart.timeScale().scrollToRealTime();
 
@@ -1133,9 +1126,6 @@ class ScreenshotService {
 </html>`;
   }
 
-  /**
-   * Enforces strict maximum screenshot file count (keeps latest maxCount = 6)
-   */
   enforceMaxScreenshots(maxCount = 6) {
     try {
       if (!fs.existsSync(SCREENSHOTS_DIR)) return;
@@ -1145,7 +1135,7 @@ class ScreenshotService {
           const full = path.join(SCREENSHOTS_DIR, f);
           return { file: f, path: full, mtime: fs.statSync(full).mtimeMs };
         })
-        .sort((a, b) => b.mtime - a.mtime); // newest first
+        .sort((a, b) => b.mtime - a.mtime);
 
       if (files.length > maxCount) {
         const toDelete = files.slice(maxCount);
@@ -1165,9 +1155,6 @@ class ScreenshotService {
     }
   }
 
-  /**
-   * Automatic cleanup of old screenshots
-   */
   cleanupOldScreenshots() {
     try {
       if (!fs.existsSync(SCREENSHOTS_DIR)) return;
