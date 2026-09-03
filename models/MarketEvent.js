@@ -1,6 +1,12 @@
 import mongoose from 'mongoose';
 
 const MarketEventSchema = new mongoose.Schema({
+  eventId: {
+    type: String,
+    index: true,
+    unique: true,
+    sparse: true
+  },
   symbol: {
     type: String,
     required: true,
@@ -16,16 +22,11 @@ const MarketEventSchema = new mongoose.Schema({
     type: String,
     default: 'OANDA'
   },
-  pivotType: {
-    type: String,
-    default: 'TRADITIONAL'
+  customPrice: {
+    type: Number
   },
-  pivotTimeframe: {
-    type: String,
-    default: 'DAILY'
-  },
-  pivotPeriod: {
-    type: String
+  triggerPrice: {
+    type: Number
   },
   currentPrice: {
     type: Number,
@@ -34,17 +35,22 @@ const MarketEventSchema = new mongoose.Schema({
   level: {
     type: String,
     required: true,
-    enum: ['R3', 'R2', 'R1', 'PIVOT', 'S1', 'S2', 'S3', 'MANUAL'],
+    default: 'CUSTOM',
     index: true
   },
   levelPrice: {
     type: Number,
     required: true
   },
+  status: {
+    type: String,
+    enum: ['ACTIVE', 'TRIGGERED', 'INACTIVE'],
+    default: 'TRIGGERED',
+    index: true
+  },
   direction: {
     type: String,
-    enum: ['TOUCH_HIGH', 'TOUCH_LOW', 'TOUCH_RESISTANCE', 'TOUCH_SUPPORT', 'CROSS_UP', 'CROSS_DOWN', 'TEST_TRIGGER', 'MANUAL_CAPTURE'],
-    default: 'TOUCH_HIGH'
+    default: 'TOUCH_TARGET'
   },
   tolerance: {
     type: Number,
@@ -80,6 +86,10 @@ const MarketEventSchema = new mongoose.Schema({
     type: Boolean,
     default: false,
     index: true
+  },
+  triggeredAt: {
+    type: Date,
+    default: Date.now
   },
   timestamp: {
     type: Date,

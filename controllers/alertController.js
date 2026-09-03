@@ -79,8 +79,53 @@ export const deleteAlert = async (req, res) => {
 
 export const getAlertStates = (req, res) => {
   try {
-    const states = alertService.getAlertStates();
+    const { symbol } = req.query;
+    const states = alertService.getAllLevelStates(symbol);
     res.json({ success: true, data: states });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+export const getCustomPriceAlert = (req, res) => {
+  try {
+    const { symbol } = req.query;
+    const custom = alertService.getCustomAlert(symbol);
+    res.json({ success: true, data: custom });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+export const setCustomPriceAlert = async (req, res) => {
+  try {
+    const { symbol, targetPrice, price, enabled } = req.body || {};
+    const priceVal = targetPrice !== undefined ? targetPrice : price;
+    const isEnabled = enabled !== undefined ? enabled : true;
+
+    const result = await alertService.setCustomAlert(symbol, priceVal, isEnabled);
+    res.json({ success: true, message: 'Custom price alert set successfully.', data: result });
+  } catch (err) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+};
+
+export const deleteCustomPriceAlert = async (req, res) => {
+  try {
+    const symbol = req.params.symbol || req.query.symbol || req.body?.symbol;
+    const result = await alertService.deleteCustomAlert(symbol);
+    res.json({ success: true, message: 'Custom price alert deleted successfully.', data: result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+export const triggerCustomTestAlert = async (req, res) => {
+  try {
+    const { symbol, targetPrice, price } = req.body || {};
+    const priceVal = targetPrice !== undefined ? targetPrice : price;
+    const event = await alertService.triggerTestAlert('CUSTOM', priceVal);
+    res.json({ success: true, message: 'Custom test alert triggered.', data: event });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -88,9 +133,9 @@ export const getAlertStates = (req, res) => {
 
 export const resetAlertLevel = (req, res) => {
   try {
-    const { level } = req.params;
-    const ok = alertService.resetLevel(level.toUpperCase());
-    res.json({ success: ok, message: `Level ${level} reset to READY state.` });
+    const { symbol } = req.body || {};
+    const ok = alertService.resetLevelState(symbol, 'CUSTOM');
+    res.json({ success: ok, message: 'Custom alert state reset to READY.' });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -98,7 +143,7 @@ export const resetAlertLevel = (req, res) => {
 
 export const getScreenshotEngineStatus = (req, res) => {
   try {
-    const status = screenshotService.getStatus();
+    const status = screenshotService.stats || {};
     res.json({ success: true, data: status });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });

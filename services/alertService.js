@@ -2,8 +2,10 @@ import EventEmitter from 'events';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import mongoose from 'mongoose';
 import { logger } from '../utils/logger.js';
 import { MarketEvent } from '../models/MarketEvent.js';
+import { AlertConfiguration } from '../models/AlertConfiguration.js';
 import { symbolService } from './symbolService.js';
 import { pivotService } from './pivotService.js';
 import { screenshotService } from './screenshotService.js';
@@ -19,324 +21,425 @@ class AlertService extends EventEmitter {
     super();
     this.io = null;
 
-    // Per-symbol level trigger states: symbol -> { R3: { status, touchCount, lastTriggerPrice, lastTriggerTime }, ... }
-    this.symbolLevelStates = new Map();
-    this.isProcessingAlert = false;
-    this.lastProcessedDateStr = new Date().toISOString().split('T')[0];
-    this.dailyResetTimer = null;
+    // Per-symbol active custom alert state:
+    // symbol -> { targetPrice: number, enabled: boolean, status: 'ACTIVE' | 'TRIGGERED' | 'INACTIVE', eventId: string, lastTriggerPrice: number, lastTriggerTime: Date }
+    this.customAlerts = new Map();
+    // Non-blocking lock set to prevent duplicate trigger races: 'SYMBOL:CUSTOM'
+    this.alertLocks = new Set();
   }
 
   async initialize(socketServer) {
-    logger.alert('Initializing Multi-Symbol Level Touch Alert Engine...');
+    logger.alert('Initializing Central Custom Price Alert Engine...');
     this.io = socketServer;
 
-    // Listen to market ticks
+    // 1. Load active custom price alerts from MongoDB into memory
+    await this.loadActiveCustomAlertsFromDB();
+
+    // 2. Listen to market ticks from centralized MarketDataService
     marketDataService.on('tick', (data) => {
       this.evaluateMarketPrice(data);
     });
 
-    // Listen to new pivot levels and rollover
-    pivotService.on('pivot:updated', ({ symbol, state }) => {
-      logger.alert(`🔄 Alert Engine re-binding to pivot levels for ${symbol}: R3=${state?.r3}, R2=${state?.r2}, S2=${state?.s2}, S3=${state?.s3}`);
-      this.resetAllLevelStates(symbol);
+    // 3. Listen to config updates
+    pivotService.on('config:updated', ({ symbol, config }) => {
+      this.syncCustomAlertFromConfig(symbol, config);
     });
 
-    // Start Daily Session Rollover & Midnight Reset worker (checks every 30s)
-    if (this.dailyResetTimer) clearInterval(this.dailyResetTimer);
-    this.dailyResetTimer = setInterval(() => this.checkDailyRolloverReset(), 30000);
+    // 4. Initial history cleanup (max 6 latest records)
+    if (mongoose.connection.readyState === 1) {
+      await this.enforceMaxHistory(6);
+    }
 
-    // Run initial cleanup to keep max 6 latest records
-    await this.enforceMaxHistory(6);
-
-    logger.alert('Level Touch Alert Engine ready.');
+    logger.alert('Central Custom Price Alert Engine ready (Level-touch alert monitoring completely removed).');
   }
 
   /**
-   * Periodic check to ensure level alert states are 100% refreshed every new day / session
+   * Load saved custom price alert configurations from MongoDB
    */
-  checkDailyRolloverReset() {
-    const todayDateStr = new Date().toISOString().split('T')[0];
-    if (this.lastProcessedDateStr !== todayDateStr) {
-      logger.alert(`🌅 Midnight UTC Rollover detected (${this.lastProcessedDateStr} -> ${todayDateStr}). Resetting all level alert states to READY.`);
-      this.lastProcessedDateStr = todayDateStr;
-      for (const sym of this.symbolLevelStates.keys()) {
-        this.resetAllLevelStates(sym);
-      }
-    }
+  async loadActiveCustomAlertsFromDB() {
+    if (mongoose.connection.readyState !== 1) return;
+    try {
+      const configs = await AlertConfiguration.find();
+      for (const cfg of configs) {
+        const sym = (cfg.symbol || 'XAUUSD').toUpperCase();
+        const enabled = Boolean(cfg.customPriceAlertEnabled);
+        const targetPrice = parseFloat(cfg.customPriceAlertTarget) || 0;
+        const status = cfg.customPriceAlertStatus || (enabled && targetPrice > 0 ? 'ACTIVE' : 'INACTIVE');
 
-    // Safety auto-rearm: If any level was triggered > 12 hours ago, auto-rearm to READY
-    const now = Date.now();
-    for (const [sym, states] of this.symbolLevelStates.entries()) {
-      for (const [lvl, st] of Object.entries(states)) {
-        if (st.lastTriggerTime && (st.status === 'TRIGGERED' || st.status === 'COMPLETED')) {
-          const elapsed = now - new Date(st.lastTriggerTime).getTime();
-          if (elapsed > 12 * 60 * 60 * 1000) {
-            logger.info(`⏰ Auto-rearming stale level ${lvl} for ${sym} (last touch was ${Math.round(elapsed / 3600000)}h ago).`);
-            st.status = 'READY';
-            st.touchCount = 0;
-            if (this.io) this.io.emit('alert:states', this.getAllLevelStates(sym));
-          }
-        }
+        this.customAlerts.set(sym, {
+          symbol: sym,
+          targetPrice,
+          enabled,
+          status,
+          eventId: null,
+          lastTriggerPrice: null,
+          lastTriggerTime: null
+        });
       }
+      logger.info(`Loaded ${this.customAlerts.size} custom price alert configurations from database.`);
+    } catch (err) {
+      logger.warn(`Could not load custom alerts from DB: ${err.message}`);
     }
   }
 
-  getLevelState(symbolStr, levelName) {
+  /**
+   * Sync memory state with updated config
+   */
+  syncCustomAlertFromConfig(symbolStr, config) {
+    const sym = (symbolStr || symbolService.getActiveSymbol()).toUpperCase();
+    if (!config) return;
+
+    const enabled = Boolean(config.customPriceAlertEnabled);
+    const targetPrice = parseFloat(config.customPriceAlertTarget) || 0;
+    const status = enabled && targetPrice > 0 ? (config.customPriceAlertStatus || 'ACTIVE') : 'INACTIVE';
+
+    this.customAlerts.set(sym, {
+      symbol: sym,
+      targetPrice,
+      enabled,
+      status,
+      eventId: null,
+      lastTriggerPrice: null,
+      lastTriggerTime: null
+    });
+
+    this.alertLocks.delete(`${sym}:CUSTOM`);
+    logger.info(`Custom alert synchronized for ${sym}: target=$${targetPrice.toFixed(2)}, enabled=${enabled}, status=${status}`);
+  }
+
+  /**
+   * Get active custom alert for symbol
+   */
+  getCustomAlert(symbolStr) {
     const sym = (symbolStr || symbolService.getActiveSymbol()).replace(/^.*:/, '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
-    if (!this.symbolLevelStates.has(sym)) {
-      this.symbolLevelStates.set(sym, {
-        R3: { status: 'READY', touchCount: 0, lastTriggerPrice: null, lastTriggerTime: null },
-        R2: { status: 'READY', touchCount: 0, lastTriggerPrice: null, lastTriggerTime: null },
-        R1: { status: 'READY', touchCount: 0, lastTriggerPrice: null, lastTriggerTime: null },
-        PIVOT: { status: 'READY', touchCount: 0, lastTriggerPrice: null, lastTriggerTime: null },
-        S1: { status: 'READY', touchCount: 0, lastTriggerPrice: null, lastTriggerTime: null },
-        S2: { status: 'READY', touchCount: 0, lastTriggerPrice: null, lastTriggerTime: null },
-        S3: { status: 'READY', touchCount: 0, lastTriggerPrice: null, lastTriggerTime: null }
+    if (!this.customAlerts.has(sym)) {
+      const config = pivotService.getConfig(sym);
+      const enabled = Boolean(config?.customPriceAlertEnabled);
+      const targetPrice = parseFloat(config?.customPriceAlertTarget) || 0;
+      this.customAlerts.set(sym, {
+        symbol: sym,
+        targetPrice,
+        enabled,
+        status: enabled && targetPrice > 0 ? 'ACTIVE' : 'INACTIVE',
+        eventId: null,
+        lastTriggerPrice: null,
+        lastTriggerTime: null
       });
     }
-    return this.symbolLevelStates.get(sym)[levelName];
+    return this.customAlerts.get(sym);
   }
 
+  /**
+   * Backward-compatible alert state helper (returns CUSTOM state)
+   */
   getAllLevelStates(symbolStr) {
-    const sym = (symbolStr || symbolService.getActiveSymbol()).replace(/^.*:/, '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
-    if (!this.symbolLevelStates.has(sym)) {
-      this.getLevelState(sym, 'R3'); // Initializer
-    }
-    const stateObj = this.symbolLevelStates.get(sym);
-    const result = {};
-    for (const [k, v] of Object.entries(stateObj)) {
-      result[k] = { status: v.status, touchCount: v.touchCount || 0, maxTouches: 2 };
-    }
-    return result;
+    const sym = (symbolStr || symbolService.getActiveSymbol()).toUpperCase();
+    const custom = this.getCustomAlert(sym);
+    return {
+      CUSTOM: {
+        status: custom.status === 'ACTIVE' ? 'READY' : custom.status,
+        targetPrice: custom.targetPrice,
+        enabled: custom.enabled,
+        lastTriggerPrice: custom.lastTriggerPrice,
+        lastTriggerTime: custom.lastTriggerTime
+      }
+    };
   }
 
-  resetAllLevelStates(symbolStr) {
-    const sym = (symbolStr || symbolService.getActiveSymbol()).replace(/^.*:/, '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
-    if (this.symbolLevelStates.has(sym)) {
-      const states = this.symbolLevelStates.get(sym);
-      for (const key of Object.keys(states)) {
-        states[key] = { status: 'READY', touchCount: 0, lastTriggerPrice: null, lastTriggerTime: null };
-      }
-    } else {
-      this.getLevelState(sym, 'R3');
-    }
-    logger.alert(`✨ All level alert states for ${sym} have been reset to READY (touchCount=0) for new session period.`);
-    if (this.io) {
-      this.io.emit('alert:states', this.getAllLevelStates(sym));
-    }
+  getAlertStates(symbolStr) {
+    return this.getAllLevelStates(symbolStr);
   }
 
   resetLevelState(symbolStr, levelName) {
+    const sym = (symbolStr || symbolService.getActiveSymbol()).toUpperCase();
+    return this.rearmCustomAlert(sym);
+  }
+
+  resetLevel(levelName, symbolStr) {
+    return this.resetLevelState(symbolStr, levelName);
+  }
+
+  resetAllLevelStates(symbolStr) {
+    const sym = (symbolStr || symbolService.getActiveSymbol()).toUpperCase();
+    return this.rearmCustomAlert(sym);
+  }
+
+  /**
+   * Set or update custom price alert in Online Database and broadcast to all devices
+   */
+  async setCustomAlert(symbolStr, targetPrice, enabled = true) {
     const sym = (symbolStr || symbolService.getActiveSymbol()).replace(/^.*:/, '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
-    const state = this.getLevelState(sym, levelName);
-    if (state) {
-      state.status = 'READY';
-      state.touchCount = 0;
-      state.lastTriggerPrice = null;
-      state.lastTriggerTime = null;
-      logger.info(`Level ${levelName} for ${sym} manually reset to READY.`);
+    const numericTarget = parseFloat(targetPrice);
+
+    if (isNaN(numericTarget) || numericTarget <= 0) {
+      throw new Error('Target price must be a valid positive number.');
+    }
+
+    const state = {
+      symbol: sym,
+      targetPrice: numericTarget,
+      enabled: Boolean(enabled),
+      status: enabled ? 'ACTIVE' : 'INACTIVE',
+      eventId: null,
+      lastTriggerPrice: null,
+      lastTriggerTime: null
+    };
+
+    this.customAlerts.set(sym, state);
+    this.alertLocks.delete(`${sym}:CUSTOM`);
+
+    // 1. Persist to MongoDB online database (Single Source of Truth)
+    if (mongoose.connection.readyState === 1) {
+      try {
+        await AlertConfiguration.findOneAndUpdate(
+          { symbol: sym },
+          {
+            symbol: sym,
+            customPriceAlertEnabled: Boolean(enabled),
+            customPriceAlertTarget: numericTarget,
+            customPriceAlertStatus: state.status,
+            customPriceAlertSetAt: new Date()
+          },
+          { upsert: true, new: true }
+        );
+      } catch (dbErr) {
+        logger.error(`Failed to save custom alert to MongoDB: ${dbErr.message}`);
+      }
+    }
+
+    // 2. Update PivotService in-memory config
+    const currentCfg = pivotService.getConfig(sym);
+    if (currentCfg) {
+      currentCfg.customPriceAlertEnabled = Boolean(enabled);
+      currentCfg.customPriceAlertTarget = numericTarget;
+      currentCfg.customPriceAlertStatus = state.status;
+    }
+
+    // 3. Realtime Broadcast to all connected devices (Web, Mobile 1..5)
+    if (this.io) {
+      const payload = {
+        symbol: sym,
+        customPriceAlertEnabled: Boolean(enabled),
+        customPriceAlertTarget: numericTarget,
+        customPriceAlertStatus: state.status,
+        customAlert: state,
+        alertStates: this.getAllLevelStates(sym)
+      };
+      this.io.emit('custom_alert:updated', payload);
+      this.io.emit('config:update', payload);
+      this.io.emit('config_updated', payload);
+      this.io.emit('alert:states', this.getAllLevelStates(sym));
+    }
+
+    logger.alert(`🎯 Custom Price Alert SET for ${sym}: $${numericTarget.toFixed(2)} (Status: ${state.status}) - Synced to all devices.`);
+    return state;
+  }
+
+  /**
+   * Delete / Deactivate custom price alert in Online Database and broadcast to all devices
+   */
+  async deleteCustomAlert(symbolStr) {
+    const sym = (symbolStr || symbolService.getActiveSymbol()).replace(/^.*:/, '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+    
+    const state = {
+      symbol: sym,
+      targetPrice: 0,
+      enabled: false,
+      status: 'INACTIVE',
+      eventId: null,
+      lastTriggerPrice: null,
+      lastTriggerTime: null
+    };
+
+    this.customAlerts.set(sym, state);
+    this.alertLocks.delete(`${sym}:CUSTOM`);
+
+    // 1. Clear in MongoDB online database
+    if (mongoose.connection.readyState === 1) {
+      try {
+        await AlertConfiguration.findOneAndUpdate(
+          { symbol: sym },
+          {
+            customPriceAlertEnabled: false,
+            customPriceAlertTarget: 0,
+            customPriceAlertStatus: 'INACTIVE'
+          },
+          { new: true }
+        );
+      } catch (dbErr) {
+        logger.error(`Failed to delete custom alert in MongoDB: ${dbErr.message}`);
+      }
+    }
+
+    // 2. Update PivotService in-memory config
+    const currentCfg = pivotService.getConfig(sym);
+    if (currentCfg) {
+      currentCfg.customPriceAlertEnabled = false;
+      currentCfg.customPriceAlertTarget = 0;
+      currentCfg.customPriceAlertStatus = 'INACTIVE';
+    }
+
+    // 3. Realtime Broadcast deletion to all connected devices
+    if (this.io) {
+      const payload = {
+        symbol: sym,
+        customPriceAlertEnabled: false,
+        customPriceAlertTarget: 0,
+        customPriceAlertStatus: 'INACTIVE',
+        customAlert: state,
+        alertStates: this.getAllLevelStates(sym)
+      };
+      this.io.emit('custom_alert:deleted', payload);
+      this.io.emit('custom_alert:updated', payload);
+      this.io.emit('config:update', payload);
+      this.io.emit('config_updated', payload);
+      this.io.emit('alert:states', this.getAllLevelStates(sym));
+    }
+
+    logger.alert(`🗑️ Custom Price Alert DELETED for ${sym} - White line removed, monitoring stopped.`);
+    return state;
+  }
+
+  /**
+   * Re-arm custom price alert to ACTIVE status
+   */
+  rearmCustomAlert(symbolStr) {
+    const sym = (symbolStr || symbolService.getActiveSymbol()).toUpperCase();
+    const custom = this.getCustomAlert(sym);
+    if (custom && custom.targetPrice > 0) {
+      custom.status = 'ACTIVE';
+      this.alertLocks.delete(`${sym}:CUSTOM`);
+      logger.info(`Custom alert for ${sym} re-armed to ACTIVE.`);
       if (this.io) {
+        this.io.emit('custom_alert:updated', { symbol: sym, customAlert: custom });
         this.io.emit('alert:states', this.getAllLevelStates(sym));
       }
+      return true;
     }
+    return false;
   }
 
-
   /**
-   * Core Level-Touch Evaluation Function with Tick Crossing & Range Detection
-   * Enforces 2 triggers/screenshots per level per active pivot period with automatic daily refresh.
+   * CENTRAL PRICE TOUCH EVALUATION ENGINE
+   * Continuously monitors live market ticks strictly against the online custom target.
+   * NO LEVEL TOUCH (S2, S3, R2, R3) DETECTION IS PERFORMED.
    */
   evaluateMarketPrice(marketData) {
-    if (this.isProcessingAlert) return;
+    if (!marketData || !marketData.price) return;
 
     const sym = (marketData.rawSymbol || symbolService.getActiveSymbol()).toUpperCase();
-    const config = pivotService.getConfig(sym);
-    if (!config || !config.enabled) return;
+    const custom = this.getCustomAlert(sym);
 
-    const pivot = pivotService.getActivePivotState();
-    if (!pivot || !pivot.isValid) return;
+    // Only monitor if alert is enabled, target price is valid, and state is ACTIVE
+    if (!custom || !custom.enabled || custom.targetPrice <= 0 || custom.status !== 'ACTIVE') {
+      return;
+    }
 
     const currentPrice = parseFloat(marketData.price);
-    if (isNaN(currentPrice)) return;
-    const prevPrice = marketData.previousPrice !== null && !isNaN(marketData.previousPrice) ? parseFloat(marketData.previousPrice) : currentPrice;
-    const tolerance = parseFloat(config.tolerance || 0.20);
-    const retriggerDistance = parseFloat(config.retriggerDistance || 1.00);
+    if (isNaN(currentPrice) || currentPrice <= 0) return;
 
-    const levelsToEvaluate = [
-      { name: 'R3', target: pivot.r3, direction: 'TOUCH_RESISTANCE' },
-      { name: 'R2', target: pivot.r2, direction: 'TOUCH_RESISTANCE' },
-      { name: 'S2', target: pivot.s2, direction: 'TOUCH_SUPPORT' },
-      { name: 'S3', target: pivot.s3, direction: 'TOUCH_SUPPORT' }
-    ];
+    const prevPrice = (marketData.previousPrice !== null && marketData.previousPrice !== undefined && !isNaN(marketData.previousPrice))
+      ? parseFloat(marketData.previousPrice)
+      : currentPrice;
 
-    for (const lvl of levelsToEvaluate) {
-      if (lvl.target === undefined || lvl.target === null || isNaN(lvl.target)) continue;
+    const config = pivotService.getConfig(sym);
+    const tolerance = parseFloat(config?.tolerance || 0.20);
+    const targetPrice = custom.targetPrice;
+    const lockKey = `${sym}:CUSTOM`;
 
-      const state = this.getLevelState(sym, lvl.name);
-      if (!state) continue;
+    // Prevent duplicate trigger if already processing this event
+    if (this.alertLocks.has(lockKey)) return;
 
-      // 2-touch lock check: if level is already COMPLETED / LOCKED / has >=2 touches, check hysteresis
-      if (state.status === 'COMPLETED' || state.status === 'LOCKED' || (state.touchCount || 0) >= 2) {
-        continue;
-      }
+    // 1. Proximity / Range Touch Check
+    const diff = Math.abs(currentPrice - targetPrice);
+    const isTouching = diff <= tolerance;
 
-      const diff = Math.abs(currentPrice - lvl.target);
-      
-      // 1. Range Touch Check: within tolerance band
-      const isTouching = diff <= tolerance;
+    // 2. Tick Crossing Check (crossed up or crossed down)
+    const crossedUp = prevPrice < targetPrice && currentPrice >= targetPrice;
+    const crossedDown = prevPrice > targetPrice && currentPrice <= targetPrice;
+    const isCrossing = crossedUp || crossedDown;
 
-      // 2. Tick Crossing Check: price crossed over the level
-      const crossedUp = prevPrice < lvl.target && currentPrice >= lvl.target;
-      const crossedDown = prevPrice > lvl.target && currentPrice <= lvl.target;
-      const isCrossing = crossedUp || crossedDown;
+    if (isTouching || isCrossing) {
+      // Mark state as TRIGGERED immediately to prevent duplicate alerts
+      custom.status = 'TRIGGERED';
+      custom.lastTriggerPrice = currentPrice;
+      custom.lastTriggerTime = new Date();
 
-      // Hysteresis & Debounce state transition check
-      if (state.status === 'TRIGGERED' || state.status === 'PREVIOUSLY_TOUCHED') {
-        const distanceFromLast = Math.abs(currentPrice - (state.lastTriggerPrice || lvl.target));
-        
-        if (state.status === 'TRIGGERED' && distanceFromLast >= retriggerDistance) {
-          state.status = 'PREVIOUSLY_TOUCHED';
-          logger.info(`Level ${lvl.name} (${sym}) transitioned to PREVIOUSLY_TOUCHED. Distance moved: ${distanceFromLast.toFixed(2)} (>= threshold ${retriggerDistance.toFixed(2)})`);
-          if (this.io) this.io.emit('alert:states', this.getAllLevelStates(sym));
-        }
+      const reason = `${sym} touched Custom Target Price @ $${currentPrice.toFixed(2)} (Target: $${targetPrice.toFixed(2)}, Tolerance: ±$${tolerance.toFixed(2)})`;
 
-        if (state.status === 'PREVIOUSLY_TOUCHED' && distanceFromLast >= (retriggerDistance * 2.0)) {
-          if ((state.touchCount || 0) < 2) {
-            state.status = 'READY';
-            logger.info(`Level ${lvl.name} (${sym}) re-armed to READY for touch #${(state.touchCount || 0) + 1}/2. Distance: ${distanceFromLast.toFixed(2)}`);
-            if (this.io) this.io.emit('alert:states', this.getAllLevelStates(sym));
-          } else {
-            state.status = 'COMPLETED';
-            logger.info(`Level ${lvl.name} (${sym}) has completed 2 touches for current period. Locking level until next session.`);
-            if (this.io) this.io.emit('alert:states', this.getAllLevelStates(sym));
-          }
-        }
-      }
+      logger.alert(`🚨 >>> CENTRAL ALERT TRIGGERED: ${reason} <<<`);
 
-      // Trigger condition: Touching or Crossing while in READY state AND touchCount < 2
-      if ((isTouching || isCrossing) && state.status === 'READY' && (state.touchCount || 0) < 2) {
-        const nextTouchCount = (state.touchCount || 0) + 1;
-        state.touchCount = nextTouchCount;
-        const reason = `${sym} touched ${lvl.name} (Touch ${nextTouchCount}/2) @ $${currentPrice.toFixed(2)} (Target: $${lvl.target.toFixed(2)}, Tolerance: ±$${tolerance.toFixed(2)})`;
-
-        // Execute alert pipeline asynchronously (non-blocking)
-        this.triggerAlertPipeline({
-          symbol: sym,
-          displayName: marketData.displayName || sym,
-          level: lvl.name,
-          levelPrice: lvl.target,
-          currentPrice,
-          previousPrice: prevPrice,
-          direction: crossedUp ? 'CROSS_UP' : (crossedDown ? 'CROSS_DOWN' : lvl.direction),
-          tolerance,
-          triggerReason: reason,
-          isTest: false,
-          pivotPeriod: pivot.periodDateStr || 'DAILY',
-          pivotType: pivot.pivotType,
-          pivotTimeframe: pivot.pivotTimeframe,
-          touchCount: nextTouchCount
-        }).catch(err => {
-          logger.error(`Alert pipeline error: ${err.message}`);
-        });
-        break;
-      }
+      // Trigger Central Alert Pipeline (generates ONE event with unique eventId)
+      this.triggerAlertPipeline({
+        symbol: sym,
+        displayName: marketData.displayName || sym,
+        level: 'CUSTOM',
+        levelPrice: targetPrice,
+        currentPrice,
+        previousPrice: prevPrice,
+        direction: crossedUp ? 'CROSS_UP' : (crossedDown ? 'CROSS_DOWN' : 'TOUCH_TARGET'),
+        tolerance,
+        triggerReason: reason,
+        isTest: false
+      }).catch(err => {
+        logger.error(`Custom price alert pipeline error: ${err.message}`);
+      });
     }
   }
 
   /**
-   * On-demand manual test alert trigger (used by TestConsoleModal)
-   */
-  async triggerTestAlert(levelName = 'R2', customPrice = null) {
-    const sym = symbolService.getActiveSymbol();
-    const pivot = pivotService.getActivePivotState();
-    const config = pivotService.getConfig(sym);
-    const lvlKey = levelName.toLowerCase();
-    const targetPrice = customPrice !== null && customPrice !== undefined && !isNaN(customPrice)
-      ? parseFloat(customPrice)
-      : (pivot?.[lvlKey] || config[lvlKey] || 4657.48);
-
-    const state = this.getLevelState(sym, levelName.toUpperCase());
-    const nextTouchCount = state ? Math.min((state.touchCount || 0) + 1, 2) : 1;
-    const reason = `[TEST MODE] Simulated Touch ${nextTouchCount}/2 on ${sym} Level ${levelName.toUpperCase()} @ $${targetPrice.toFixed(2)}`;
-
-    return await this.triggerAlertPipeline({
-      symbol: sym,
-      displayName: symbolService.getActiveSymbolConfig()?.displayName || sym,
-      level: levelName.toUpperCase(),
-      levelPrice: targetPrice,
-      currentPrice: targetPrice,
-      previousPrice: targetPrice - 1.0,
-      direction: levelName.toUpperCase().startsWith('R') ? 'TOUCH_RESISTANCE' : 'TOUCH_SUPPORT',
-      tolerance: config.tolerance || 0.20,
-      triggerReason: reason,
-      isTest: true,
-      pivotPeriod: pivot?.periodDateStr || 'DAILY',
-      pivotType: pivot?.pivotType || config.pivotType,
-      pivotTimeframe: pivot?.pivotTimeframe || config.pivotTimeframe,
-      touchCount: nextTouchCount
-    });
-  }
-
-  /**
-   * Executes full alert pipeline: Fast Socket Broadcast -> Screenshot -> Telegram -> MongoDB
+   * Central Alert Pipeline Execution
+   * Generates ONE central event with a unique event ID, captures screenshot with white line,
+   * sends Telegram notification, saves to MongoDB online database, and broadcasts to all devices.
    */
   async triggerAlertPipeline(alertParams) {
-    this.isProcessingAlert = true;
+    const sym = (alertParams.symbol || symbolService.getActiveSymbol()).toUpperCase();
+    const symConfig = symbolService.getSymbol(sym) || symbolService.getActiveSymbolConfig();
+    const config = pivotService.getConfig(sym) || {};
+    const lockKey = `${sym}:CUSTOM`;
 
-    // Safety timeout to prevent isProcessingAlert from ever hanging indefinitely
-    const safetyTimeout = setTimeout(() => {
-      this.isProcessingAlert = false;
+    this.alertLocks.add(lockKey);
+
+    // Auto-clear lock after 15s safety timeout
+    const lockSafetyTimeout = setTimeout(() => {
+      this.alertLocks.delete(lockKey);
     }, 15000);
 
     try {
-      const sym = (alertParams.symbol || symbolService.getActiveSymbol()).replace(/^.*:/, '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
-      const currentTouch = alertParams.touchCount || 1;
+      const now = new Date();
+      const timeStr = now.toISOString().replace(/[-:T.Z]/g, '').slice(0, 14);
+      const customPriceVal = Number(alertParams.levelPrice || alertParams.currentPrice);
+      const eventId = `${sym}-${customPriceVal.toFixed(2)}-${timeStr}`;
 
+      logger.alert(`>>> PROCESSING CENTRAL ALERT EVENT [${eventId}]: ${sym} @ $${alertParams.currentPrice} <<<`);
 
-
-      // Update state
-      const state = this.getLevelState(sym, alertParams.level);
-      
-      // Strict 2-touch lock gate: block live market alerts if level is already locked
-      if (!alertParams.isTest && state && (state.status === 'COMPLETED' || state.status === 'LOCKED') && state.touchCount >= 2) {
-        logger.warn(`🛑 Alert suppressed: Level ${alertParams.level} for ${sym} is locked (2/2 touches reached).`);
-        return null;
-      }
-
-      logger.alert(`>>> TRIGGERING ALERT (Touch ${currentTouch}/2${currentTouch >= 2 ? ' - LEVEL LOCKED' : ''}): ${sym} ${alertParams.level} @ $${alertParams.currentPrice} (${alertParams.isTest ? 'TEST MODE' : 'LIVE MARKET'}) <<<`);
-
-      if (state) {
-        state.touchCount = currentTouch;
-        state.status = currentTouch >= 2 ? 'COMPLETED' : 'TRIGGERED';
-        state.lastTriggerPrice = alertParams.currentPrice;
-        state.lastTriggerTime = new Date();
-      }
-
-      const config = pivotService.getConfig(sym);
-      const symConfig = symbolService.getSymbol(sym) || symbolService.getActiveSymbolConfig();
-
-      // 1. FAST BROADCAST: Immediately emit to Web & Mobile clients so alarms sound with ZERO delay
-      const tempId = `evt-${Date.now()}`;
+      // 1. Immediate Socket.IO Broadcast to ALL Connected Devices (Instant UI & Audio Alarm)
       const earlyEvent = {
-        _id: tempId,
-        id: tempId,
+        eventId,
         symbol: sym,
         assetType: symConfig?.assetType || 'COMMODITY',
         exchange: symConfig?.exchange || 'OANDA',
+        customPrice: customPriceVal,
+        triggerPrice: alertParams.currentPrice,
         currentPrice: alertParams.currentPrice,
-        previousPrice: alertParams.previousPrice,
-        level: alertParams.level,
-        levelPrice: alertParams.levelPrice,
+        level: 'CUSTOM',
+        levelPrice: customPriceVal,
+        status: 'TRIGGERED',
         direction: alertParams.direction,
         tolerance: alertParams.tolerance,
         triggerReason: alertParams.triggerReason,
         screenshotPath: '',
         telegramStatus: 'PENDING',
         isTest: !!alertParams.isTest,
-        timestamp: new Date()
+        triggeredAt: now,
+        timestamp: now
       };
 
       if (this.io) {
+        this.io.emit('custom_alert:triggered', {
+          event: earlyEvent,
+          alertStates: this.getAllLevelStates(sym)
+        });
         this.io.emit('alert:triggered', {
           event: earlyEvent,
           alertStates: this.getAllLevelStates(sym),
@@ -345,7 +448,7 @@ class AlertService extends EventEmitter {
         this.io.emit('alert_triggered', earlyEvent);
       }
 
-      // 2. Generate Real TradingView Screenshot (with guaranteed touch & Resvg fallback)
+      // 2. Generate Chart Screenshot using EXISTING SETTINGS (showing WHITE custom price line)
       let screenshotData = { filename: '', fullPath: '', relativePath: '', buffer: null };
       try {
         screenshotData = await screenshotService.generateChartScreenshot({
@@ -355,15 +458,16 @@ class AlertService extends EventEmitter {
           range: config.chartRange || '1D',
           barSpacing: config.barSpacing || 22,
           pivotConfig: config,
-          timestamp: new Date()
+          customPrice: customPriceVal,
+          timestamp: now
         });
       } catch (screenErr) {
-        logger.error(`Screenshot generation notice in alert pipeline: ${screenErr.message}`);
+        logger.error(`Screenshot capture error: ${screenErr.message}`);
       }
 
       const screenshotPath = screenshotData.cloudinaryUrl || screenshotData.relativePath || '';
 
-      // 3. Dispatch Telegram Notification with screenshot
+      // 3. Dispatch Telegram Notification
       let telegramResult = { success: false, messageId: null, error: null };
       if (config.telegramAlertsEnabled !== false) {
         try {
@@ -372,67 +476,86 @@ class AlertService extends EventEmitter {
               ...alertParams,
               symbol: symConfig?.displayName || sym,
               tradingViewTicker: symConfig?.tradingViewTicker,
-              pivot: config.pivot,
+              customPrice: customPriceVal,
               timeframe: config.chartTimeframe,
-              touchCount: currentTouch,
-              isLocked: currentTouch >= 2
+              timestamp: now
             },
             screenshotData.fullPath || screenshotData.buffer
           );
         } catch (tgErr) {
-          logger.error(`Telegram delivery error in alert pipeline: ${tgErr.message}`);
+          logger.error(`Telegram delivery error: ${tgErr.message}`);
           telegramResult.error = tgErr.message;
         }
       } else {
         telegramResult = { success: true, messageId: 'DISABLED', message: 'Telegram alerts disabled in settings' };
       }
 
-      // 4. Persist Event in MongoDB
+      // 4. Persist Single Alert Event to MongoDB Online Database
       let eventDoc = null;
-      try {
-        eventDoc = await MarketEvent.create({
-          symbol: sym,
-          assetType: symConfig?.assetType || 'COMMODITY',
-          exchange: symConfig?.exchange || 'OANDA',
-          currentPrice: alertParams.currentPrice,
-          previousPrice: alertParams.previousPrice,
-          level: alertParams.level,
-          levelPrice: alertParams.levelPrice,
-          direction: alertParams.direction,
-          tolerance: alertParams.tolerance,
-          triggerReason: alertParams.triggerReason,
-          screenshotPath,
-          telegramStatus: telegramResult.success ? 'SENT' : 'FAILED',
-          telegramMessage: telegramResult.message,
-          telegramMessageId: telegramResult.messageId,
-          telegramError: telegramResult.error,
-          isTest: !!alertParams.isTest,
-          pivotType: alertParams.pivotType || config.pivotType,
-          pivotTimeframe: alertParams.pivotTimeframe || config.pivotTimeframe,
-          pivotPeriod: alertParams.pivotPeriod || 'DAILY',
-          timestamp: new Date()
-        });
-      } catch (dbErr) {
-        logger.error(`Failed to save MarketEvent to database: ${dbErr.message}`);
+      if (mongoose.connection.readyState === 1) {
+        try {
+          eventDoc = await MarketEvent.create({
+            eventId,
+            symbol: sym,
+            assetType: symConfig?.assetType || 'COMMODITY',
+            exchange: symConfig?.exchange || 'OANDA',
+            customPrice: customPriceVal,
+            triggerPrice: alertParams.currentPrice,
+            currentPrice: alertParams.currentPrice,
+            level: 'CUSTOM',
+            levelPrice: customPriceVal,
+            status: 'TRIGGERED',
+            direction: alertParams.direction,
+            tolerance: alertParams.tolerance,
+            triggerReason: alertParams.triggerReason,
+            screenshotPath,
+            telegramStatus: telegramResult.success ? 'SENT' : 'FAILED',
+            telegramMessage: telegramResult.message,
+            telegramMessageId: telegramResult.messageId,
+            telegramError: telegramResult.error,
+            isTest: !!alertParams.isTest,
+            triggeredAt: now,
+            timestamp: now
+          });
+
+          // Update online DB alert status to TRIGGERED
+          await AlertConfiguration.findOneAndUpdate(
+            { symbol: sym },
+            { customPriceAlertStatus: 'TRIGGERED' }
+          );
+        } catch (dbErr) {
+          logger.error(`Failed to save MarketEvent to database: ${dbErr.message}`);
+        }
+      }
+
+      if (!eventDoc) {
         eventDoc = {
-          _id: tempId,
+          _id: eventId,
+          id: eventId,
+          eventId,
           symbol: sym,
+          customPrice: customPriceVal,
+          triggerPrice: alertParams.currentPrice,
           currentPrice: alertParams.currentPrice,
-          level: alertParams.level,
-          levelPrice: alertParams.levelPrice,
+          level: 'CUSTOM',
+          levelPrice: customPriceVal,
+          status: 'TRIGGERED',
           direction: alertParams.direction,
           triggerReason: alertParams.triggerReason,
           screenshotPath,
           telegramStatus: telegramResult.success ? 'SENT' : 'FAILED',
           isTest: !!alertParams.isTest,
-          timestamp: new Date()
+          triggeredAt: now,
+          timestamp: now
         };
       }
 
-      // 5. Enforce strict max 6 records retention
-      await this.enforceMaxHistory(6);
+      // 5. Enforce Max 6 Records Retention in History
+      if (mongoose.connection.readyState === 1) {
+        await this.enforceMaxHistory(6);
+      }
 
-      // 6. Update Connected Clients with finalized event doc (with screenshotPath)
+      // 6. Final Socket.IO Broadcast with completed screenshot URL to all devices
       if (this.io) {
         const payload = {
           event: eventDoc,
@@ -440,6 +563,7 @@ class AlertService extends EventEmitter {
           distances: marketDataService.getMarketData().distances
         };
 
+        this.io.emit('custom_alert:triggered', payload);
         this.io.emit('alert:triggered', payload);
         this.io.emit('alert_triggered', eventDoc);
       }
@@ -447,12 +571,38 @@ class AlertService extends EventEmitter {
       this.emit('alertProcessed', eventDoc);
       return eventDoc;
     } finally {
-      clearTimeout(safetyTimeout);
-      this.isProcessingAlert = false;
+      clearTimeout(lockSafetyTimeout);
     }
   }
 
+  /**
+   * Test Custom Price Alert simulation
+   */
+  async triggerTestAlert(levelName = 'CUSTOM', customPrice = null) {
+    const sym = symbolService.getActiveSymbol();
+    const config = pivotService.getConfig(sym);
+    const targetPrice = customPrice !== null && customPrice !== undefined && !isNaN(customPrice)
+      ? parseFloat(customPrice)
+      : (config.customPriceAlertTarget || 3450.50);
+
+    const reason = `[TEST MODE] Simulated Touch on ${sym} Custom Target Price @ $${targetPrice.toFixed(2)}`;
+
+    return await this.triggerAlertPipeline({
+      symbol: sym,
+      displayName: symbolService.getActiveSymbolConfig()?.displayName || sym,
+      level: 'CUSTOM',
+      levelPrice: targetPrice,
+      currentPrice: targetPrice,
+      previousPrice: targetPrice - 1.0,
+      direction: 'TOUCH_TARGET',
+      tolerance: config.tolerance || 0.20,
+      triggerReason: reason,
+      isTest: true
+    });
+  }
+
   async enforceMaxHistory(limit = 6) {
+    if (mongoose.connection.readyState !== 1) return;
     try {
       const allEvents = await MarketEvent.find().sort({ timestamp: -1 });
       if (allEvents.length > limit) {

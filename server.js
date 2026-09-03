@@ -122,6 +122,30 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Client sets custom price alert via socket
+  socket.on('custom_alert:set', async (data) => {
+    try {
+      const { symbol, targetPrice, price, enabled } = data || {};
+      const sym = symbol || symbolService.getActiveSymbol();
+      const res = await alertService.setCustomAlert(sym, targetPrice !== undefined ? targetPrice : price, enabled !== false);
+      socket.emit('custom_alert:set_response', { success: true, data: res });
+    } catch (err) {
+      socket.emit('custom_alert:set_response', { success: false, error: err.message });
+    }
+  });
+
+  // Client deletes custom price alert via socket
+  socket.on('custom_alert:delete', async (data) => {
+    try {
+      const { symbol } = data || {};
+      const sym = symbol || symbolService.getActiveSymbol();
+      const res = await alertService.deleteCustomAlert(sym);
+      socket.emit('custom_alert:delete_response', { success: true, data: res });
+    } catch (err) {
+      socket.emit('custom_alert:delete_response', { success: false, error: err.message });
+    }
+  });
+
   socket.on('disconnect', () => {
     logger.info(`Client disconnected: ${socket.id}`);
   });

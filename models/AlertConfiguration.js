@@ -84,22 +84,34 @@ const AlertConfigurationSchema = new mongoose.Schema({
     type: Number,
     default: 0.20
   },
-  // Minimum distance in USD price must move away to reset a level
+  // Minimum distance in USD price must move away to re-arm
   retriggerDistance: {
     type: Number,
     default: 1.00
-  },
-  // Enabled levels for alerts (R3, R2, S2, S3 required)
-  monitoredLevels: {
-    type: [String],
-    default: ['R3', 'R2', 'S2', 'S3']
   },
   // Telegram notification toggle
   telegramAlertsEnabled: {
     type: Boolean,
     default: true
   },
-  // Reference daily HLC used for auto-pivot
+  // Online Shared Custom Price Alert
+  customPriceAlertEnabled: {
+    type: Boolean,
+    default: false
+  },
+  customPriceAlertTarget: {
+    type: Number,
+    default: 0
+  },
+  customPriceAlertStatus: {
+    type: String,
+    enum: ['ACTIVE', 'TRIGGERED', 'INACTIVE'],
+    default: 'INACTIVE'
+  },
+  customPriceAlertSetAt: {
+    type: Date
+  },
+  // Reference daily HLC used for visual auto-pivot display
   dailyHigh: Number,
   dailyLow: Number,
   dailyClose: Number,

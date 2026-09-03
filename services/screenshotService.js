@@ -575,16 +575,20 @@ class ScreenshotService {
       }
     }
 
+    const customTargetPrice = Number(alertData.customPrice || (level === 'CUSTOM' ? levelPrice : pivotConfig?.customPriceAlertTarget)) || 0;
+
     const levels = [
-      { name: 'R3', price: Number(pivotConfig?.r3 || (level === 'R3' ? levelPrice : currentPrice * 1.015)) },
-      { name: 'R2', price: Number(pivotConfig?.r2 || (level === 'R2' ? levelPrice : currentPrice * 1.008)) },
-      { name: 'S2', price: Number(pivotConfig?.s2 || (level === 'S2' ? levelPrice : currentPrice * 0.992)) },
-      { name: 'S3', price: Number(pivotConfig?.s3 || (level === 'S3' ? levelPrice : currentPrice * 0.985)) }
+      { name: 'R3', price: Number(pivotConfig?.r3 || currentPrice * 1.015) },
+      { name: 'R2', price: Number(pivotConfig?.r2 || currentPrice * 1.008) },
+      { name: 'S2', price: Number(pivotConfig?.s2 || currentPrice * 0.992) },
+      { name: 'S3', price: Number(pivotConfig?.s3 || currentPrice * 0.985) }
     ];
 
     const lows = candles.map(c => c.low);
     const highs = candles.map(c => c.high);
     const allPrices = [...lows, ...highs, ...levels.map(l => l.price), Number(levelPrice), Number(currentPrice)];
+    if (customTargetPrice > 0) allPrices.push(customTargetPrice);
+
     const minP = Math.min(...allPrices);
     const maxP = Math.max(...allPrices);
     const pad = (maxP - minP) * 0.10;
@@ -625,19 +629,25 @@ class ScreenshotService {
     });
 
     let levelsSvg = '';
+    // 1. Draw Reference Yellow Pivot Lines
     levels.forEach(lvl => {
-      const isTouched = lvl.name.toUpperCase() === String(level).toUpperCase();
       const ly = getY(lvl.price);
-      const lineColor = isTouched ? '#ef4444' : '#ffd700';
-      const strokeWidth = isTouched ? '3' : '1.8';
-      const strokeDash = isTouched ? '' : 'stroke-dasharray="6,4"';
-
       levelsSvg += `
-        <line x1="${chartLeft}" y1="${ly}" x2="${chartRight}" y2="${ly}" stroke="${lineColor}" stroke-width="${strokeWidth}" ${strokeDash} />
-        <rect x="${chartRight + 6}" y="${ly - 10}" width="95" height="20" fill="${isTouched ? '#ef4444' : '#222631'}" rx="3" />
-        <text x="${chartRight + 53}" y="${ly + 4}" fill="#ffffff" font-size="11" font-weight="bold" font-family="sans-serif" text-anchor="middle">${lvl.name} $${Number(lvl.price).toFixed(decimals)}</text>
+        <line x1="${chartLeft}" y1="${ly}" x2="${chartRight}" y2="${ly}" stroke="#ffd700" stroke-width="1.5" stroke-dasharray="6,4" />
+        <rect x="${chartRight + 6}" y="${ly - 10}" width="95" height="20" fill="#222631" rx="3" />
+        <text x="${chartRight + 53}" y="${ly + 4}" fill="#ffd700" font-size="11" font-weight="bold" font-family="sans-serif" text-anchor="middle">${lvl.name} $${Number(lvl.price).toFixed(decimals)}</text>
       `;
     });
+
+    // 2. Draw Solid WHITE Custom Price Line
+    if (customTargetPrice > 0) {
+      const cy = getY(customTargetPrice);
+      levelsSvg += `
+        <line x1="${chartLeft}" y1="${cy}" x2="${chartRight}" y2="${cy}" stroke="#ffffff" stroke-width="2.5" />
+        <rect x="${chartRight + 6}" y="${cy - 11}" width="115" height="22" fill="#ffffff" rx="4" />
+        <text x="${chartRight + 63}" y="${cy + 4}" fill="#000000" font-size="11" font-weight="900" font-family="sans-serif" text-anchor="middle">🎯 CUSTOM $${Number(customTargetPrice).toFixed(decimals)}</text>
+      `;
+    }
 
     const topBarSvg = `
       <rect x="0" y="0" width="${width}" height="48" fill="#0c0d10" />
@@ -645,8 +655,8 @@ class ScreenshotService {
       <text x="24" y="30" fill="#ffffff" font-size="15" font-weight="bold" font-family="sans-serif">${symConfig?.displayName || rawSym} · ${dynamicInterval} · ${dynamicRange}</text>
       <text x="320" y="30" fill="#787b86" font-size="13" font-family="sans-serif">Price: <tspan fill="#ffffff" font-weight="bold">$${Number(currentPrice).toFixed(decimals)}</tspan></text>
       
-      <rect x="${width - 340}" y="10" width="316" height="28" fill="${level === 'MANUAL' ? '#1e3a8a' : '#7f1d1d'}" rx="4" stroke="${level === 'MANUAL' ? '#3b82f6' : '#ef4444'}" stroke-width="1.5" />
-      <text x="${width - 182}" y="29" fill="#ffffff" font-size="12" font-weight="bold" font-family="sans-serif" text-anchor="middle">${isTest ? '🧪 TEST: ' : '🚨 '}${level === 'MANUAL' ? 'MANUAL CHART CAPTURE' : `LEVEL TOUCH: ${level} @ $${Number(levelPrice).toFixed(decimals)}`}</text>
+      <rect x="${width - 360}" y="10" width="336" height="28" fill="${level === 'MANUAL' ? '#1e3a8a' : '#0f172a'}" rx="4" stroke="${level === 'MANUAL' ? '#3b82f6' : '#ffffff'}" stroke-width="1.5" />
+      <text x="${width - 192}" y="29" fill="#ffffff" font-size="12" font-weight="bold" font-family="sans-serif" text-anchor="middle">${isTest ? '🧪 TEST: ' : '🎯 '}${level === 'MANUAL' ? 'MANUAL CHART CAPTURE' : `CUSTOM PRICE TOUCH @ $${Number(levelPrice || customTargetPrice).toFixed(decimals)}`}</text>
     `;
 
     const svg = `
@@ -968,9 +978,9 @@ class ScreenshotService {
         <span>MANUAL CAPTURE · ${rawSymbol}</span>
       </div>
       ` : `
-      <div class="alert-badge">
-        <span>${isTest ? '🧪' : '🚨'}</span>
-        <span>LEVEL TOUCH: <span class="highlight">${level}</span> @ $${Number(levelPrice).toFixed(decimals)}</span>
+      <div class="alert-badge" style="background: rgba(255, 255, 255, 0.15); border: 2px solid #ffffff; box-shadow: 0 0 16px rgba(255, 255, 255, 0.35);">
+        <span>${isTest ? '🧪' : '🎯'}</span>
+        <span>CUSTOM PRICE TOUCH: <span class="highlight" style="color: #ffffff; font-weight: 900;">$${Number(levelPrice).toFixed(decimals)}</span></span>
       </div>
       `}
     </header>
@@ -979,7 +989,7 @@ class ScreenshotService {
     <div id="chart_container">
       <div class="chart-legend">
         <div class="legend-title">
-          <span>Pivots (${legendLevelsStr})</span>
+          <span>Reference Pivots (${legendLevelsStr})</span>
         </div>
       </div>
 
@@ -1056,27 +1066,22 @@ class ScreenshotService {
     const rawData = ${JSON.stringify(candles)};
     candleSeries.setData(rawData);
 
-    // Add Horizontal Lines for R3, R2, S2, S3 across the entire chart
+    // 1. Reference Pivot Levels in YELLOW
     const levels = ${JSON.stringify(levels)};
-    const activeLevelName = "${String(level).toUpperCase()}";
+    const customTargetPrice = Number(${Number(level === 'CUSTOM' ? levelPrice : (pivotConfig?.customPriceAlertTarget || 0))});
 
-    // Dynamic zoom price scaling: Scale comfortably so candles and the touched level line are framed centered
+    // Dynamic zoom price scaling: Scale comfortably so candles and custom target are framed centered
     const candleLows = rawData.map(c => c.low).filter(v => typeof v === 'number' && !isNaN(v));
     const candleHighs = rawData.map(c => c.high).filter(v => typeof v === 'number' && !isNaN(v));
     let targetMin = candleLows.length ? Math.min(...candleLows) : Number(${currentPrice});
     let targetMax = candleHighs.length ? Math.max(...candleHighs) : Number(${currentPrice});
     const baseVal = Number(${currentPrice}) || 100.0;
 
-    // Include the active alert level in the visible frame
-    if (activeLevelName !== 'MANUAL') {
-      const activeLvlObj = levels.find(l => l.name.toUpperCase() === activeLevelName);
-      if (activeLvlObj && typeof activeLvlObj.price === 'number') {
-        targetMin = Math.min(targetMin, activeLvlObj.price);
-        targetMax = Math.max(targetMax, activeLvlObj.price);
-      }
+    if (customTargetPrice > 0) {
+      targetMin = Math.min(targetMin, customTargetPrice);
+      targetMax = Math.max(targetMax, customTargetPrice);
     }
 
-    // Include nearby pivot levels within reasonable view
     levels.forEach(l => {
       if (Math.abs(l.price - baseVal) / baseVal < 0.02) {
         targetMin = Math.min(targetMin, l.price);
@@ -1099,17 +1104,29 @@ class ScreenshotService {
       }
     });
 
+    // Draw Reference Pivot Lines in YELLOW
     levels.forEach(lvl => {
-      const isTouched = lvl.name.toUpperCase() === activeLevelName;
       candleSeries.createPriceLine({
         price: lvl.price,
-        color: isTouched ? '#ef4444' : '#ffd700', // RED if touched, YELLOW for other levels
-        lineWidth: isTouched ? 3 : 2, // BOLD for touched
-        lineStyle: isTouched ? LightweightCharts.LineStyle.Solid : LightweightCharts.LineStyle.Dotted,
+        color: '#ffd700', // Reference Yellow
+        lineWidth: 1.5,
+        lineStyle: LightweightCharts.LineStyle.Dotted,
         axisLabelVisible: true,
-        title: lvl.name + (isTouched ? ' [TOUCHED] ($' : ' ($') + Number(lvl.price).toFixed(${decimals}) + ')'
+        title: lvl.name + ' ($' + Number(lvl.price).toFixed(${decimals}) + ')'
       });
     });
+
+    // Draw Solid WHITE Custom Price Line
+    if (customTargetPrice > 0) {
+      candleSeries.createPriceLine({
+        price: customTargetPrice,
+        color: '#ffffff', // SOLID WHITE LINE FOR CUSTOM PRICE
+        lineWidth: 2.5,
+        lineStyle: LightweightCharts.LineStyle.Solid,
+        axisLabelVisible: true,
+        title: '🎯 CUSTOM PRICE ($' + Number(customTargetPrice).toFixed(${decimals}) + ')'
+      });
+    }
 
     // Respect dynamicBarSpacing and align viewport cleanly
     chart.timeScale().applyOptions({

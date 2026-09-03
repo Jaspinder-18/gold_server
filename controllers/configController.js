@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import { pivotService } from '../services/pivotService.js';
 import { symbolService } from '../services/symbolService.js';
 import { marketDataService } from '../services/marketDataService.js';
+import { alertService } from '../services/alertService.js';
 import { AlertConfiguration } from '../models/AlertConfiguration.js';
 import { logger } from '../utils/logger.js';
 
@@ -33,6 +34,8 @@ export const updateConfig = async (req, res) => {
       tolerance,
       retriggerDistance,
       telegramAlertsEnabled,
+      customPriceAlertEnabled,
+      customPriceAlertTarget,
       enabled,
       customChartUrl,
       tradingViewTicker
@@ -50,6 +53,8 @@ export const updateConfig = async (req, res) => {
       ...(tolerance !== undefined && { tolerance: parseFloat(tolerance) }),
       ...(retriggerDistance !== undefined && { retriggerDistance: parseFloat(retriggerDistance) }),
       ...(telegramAlertsEnabled !== undefined && { telegramAlertsEnabled: Boolean(telegramAlertsEnabled) }),
+      ...(customPriceAlertEnabled !== undefined && { customPriceAlertEnabled: Boolean(customPriceAlertEnabled) }),
+      ...(customPriceAlertTarget !== undefined && { customPriceAlertTarget: parseFloat(customPriceAlertTarget) }),
       ...(enabled !== undefined && { enabled: Boolean(enabled) }),
       ...(customChartUrl !== undefined && { customChartUrl: String(customChartUrl) }),
       ...(tradingViewTicker !== undefined && { tradingViewTicker: String(tradingViewTicker) }),
@@ -59,6 +64,11 @@ export const updateConfig = async (req, res) => {
       ...(pivotTimeframe !== undefined && { pivotTimeframe: String(pivotTimeframe) })
     };
     pivotService.alertConfigs.set(targetSymbol, newAlertCfg);
+
+    // Re-arm custom level state if custom price or enabled state is updated
+    if (customPriceAlertTarget !== undefined || customPriceAlertEnabled !== undefined) {
+      alertService.resetLevelState(targetSymbol, 'CUSTOM');
+    }
 
     // Sync into symbolService in-memory catalog
     const symObj = symbolService.getSymbol(targetSymbol);
@@ -118,6 +128,11 @@ export const updateConfig = async (req, res) => {
     }
     if (state) {
       pivotService.broadcastPivotState(state);
+    }
+    if (pivotService.io) {
+      pivotService.io.emit('config:update', config);
+      pivotService.io.emit('config_updated', config);
+      pivotService.io.emit('alert:states', alertService.getAllLevelStates(targetSymbol));
     }
     res.json({ success: true, data: config, pivotState: state });
   } catch (err) {

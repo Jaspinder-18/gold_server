@@ -22,6 +22,23 @@ class PivotService extends EventEmitter {
 
     await symbolService.initialize();
 
+    // Load saved alert configurations from MongoDB into memory map
+    if (mongoose.connection.readyState === 1) {
+      try {
+        const savedConfigs = await AlertConfiguration.find();
+        for (const cfg of savedConfigs) {
+          if (cfg.symbol) {
+            const symKey = cfg.symbol.toUpperCase();
+            const cfgObj = cfg.toObject ? cfg.toObject() : cfg;
+            this.alertConfigs.set(symKey, cfgObj);
+            logger.info(`Loaded saved alert config for ${symKey} (CustomAlert: ${cfg.customPriceAlertEnabled ? `ON @ $${cfg.customPriceAlertTarget}` : 'OFF'})`);
+          }
+        }
+      } catch (err) {
+        logger.warn(`Could not load saved AlertConfigurations from DB: ${err.message}`);
+      }
+    }
+
     // Listen for active symbol switch
     symbolService.on('activeSymbolChanged', async ({ activeSymbol }) => {
       logger.info(`Pivot Engine syncing for newly selected active symbol: ${activeSymbol}`);
@@ -81,6 +98,9 @@ class PivotService extends EventEmitter {
       tolerance: alertCfg.tolerance !== undefined ? Number(alertCfg.tolerance) : (symConfig?.tolerance || 0.20),
       retriggerDistance: alertCfg.retriggerDistance !== undefined ? Number(alertCfg.retriggerDistance) : (symConfig?.retriggerDistance || 1.00),
       telegramAlertsEnabled: alertCfg.telegramAlertsEnabled !== false,
+      customPriceAlertEnabled: Boolean(alertCfg.customPriceAlertEnabled),
+      customPriceAlertTarget: Number(alertCfg.customPriceAlertTarget || 0),
+      customPriceAlertStatus: alertCfg.customPriceAlertStatus || (alertCfg.customPriceAlertEnabled && alertCfg.customPriceAlertTarget > 0 ? 'ACTIVE' : 'INACTIVE'),
       r3: pivot?.r3 ?? 0,
       r2: pivot?.r2 ?? 0,
       r1: pivot?.r1 ?? 0,
