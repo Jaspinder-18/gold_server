@@ -207,13 +207,15 @@ class AlertService extends EventEmitter {
       }
     }
 
-    // 2. Update PivotService in-memory config
-    const currentCfg = pivotService.getConfig(sym);
-    if (currentCfg) {
-      currentCfg.customPriceAlertEnabled = Boolean(enabled);
-      currentCfg.customPriceAlertTarget = numericTarget;
-      currentCfg.customPriceAlertStatus = state.status;
-    }
+    // 2. Update PivotService in-memory alertConfigs map
+    const existingAlertCfg = pivotService.alertConfigs.get(sym) || {};
+    pivotService.alertConfigs.set(sym, {
+      ...existingAlertCfg,
+      symbol: sym,
+      customPriceAlertEnabled: Boolean(enabled),
+      customPriceAlertTarget: numericTarget,
+      customPriceAlertStatus: state.status
+    });
 
     // 3. Realtime Broadcast to all connected devices (Web, Mobile 1..5)
     if (this.io) {
@@ -271,13 +273,15 @@ class AlertService extends EventEmitter {
       }
     }
 
-    // 2. Update PivotService in-memory config
-    const currentCfg = pivotService.getConfig(sym);
-    if (currentCfg) {
-      currentCfg.customPriceAlertEnabled = false;
-      currentCfg.customPriceAlertTarget = 0;
-      currentCfg.customPriceAlertStatus = 'INACTIVE';
-    }
+    // 2. Update PivotService in-memory alertConfigs map
+    const existingAlertCfg = pivotService.alertConfigs.get(sym) || {};
+    pivotService.alertConfigs.set(sym, {
+      ...existingAlertCfg,
+      symbol: sym,
+      customPriceAlertEnabled: false,
+      customPriceAlertTarget: 0,
+      customPriceAlertStatus: 'INACTIVE'
+    });
 
     // 3. Realtime Broadcast deletion to all connected devices
     if (this.io) {
@@ -360,10 +364,21 @@ class AlertService extends EventEmitter {
     const isCrossing = crossedUp || crossedDown;
 
     if (isTouching || isCrossing) {
-      // Mark state as TRIGGERED immediately to prevent duplicate alerts
+      // Mark state as TRIGGERED and switch OFF immediately so all devices turn OFF upon price touch
       custom.status = 'TRIGGERED';
+      custom.enabled = false;
       custom.lastTriggerPrice = currentPrice;
       custom.lastTriggerTime = new Date();
+
+      // Update PivotService in-memory alertConfigs map
+      const existingAlertCfg = pivotService.alertConfigs.get(sym) || {};
+      pivotService.alertConfigs.set(sym, {
+        ...existingAlertCfg,
+        symbol: sym,
+        customPriceAlertEnabled: false,
+        customPriceAlertTarget: targetPrice,
+        customPriceAlertStatus: 'TRIGGERED'
+      });
 
       const reason = `${sym} touched Custom Target Price @ $${currentPrice.toFixed(2)} (Target: $${targetPrice.toFixed(2)}, Tolerance: ±$${tolerance.toFixed(2)})`;
 
@@ -435,11 +450,28 @@ class AlertService extends EventEmitter {
         timestamp: now
       };
 
+      const configUpdatePayload = {
+        symbol: sym,
+        customPriceAlertEnabled: false,
+        customPriceAlertTarget: customPriceVal,
+        customPriceAlertStatus: 'TRIGGERED',
+        customAlert: {
+          symbol: sym,
+          targetPrice: customPriceVal,
+          enabled: false,
+          status: 'TRIGGERED'
+        },
+        alertStates: this.getAllLevelStates(sym)
+      };
+
       if (this.io) {
         this.io.emit('custom_alert:triggered', {
           event: earlyEvent,
-          alertStates: this.getAllLevelStates(sym)
+          alertStates: this.getAllLevelStates(sym),
+          config: configUpdatePayload
         });
+        this.io.emit('config:update', configUpdatePayload);
+        this.io.emit('config_updated', configUpdatePayload);
         this.io.emit('alert:triggered', {
           event: earlyEvent,
           alertStates: this.getAllLevelStates(sym),
@@ -518,10 +550,10 @@ class AlertService extends EventEmitter {
             timestamp: now
           });
 
-          // Update online DB alert status to TRIGGERED
+          // Update online DB alert status to TRIGGERED and switch to OFF
           await AlertConfiguration.findOneAndUpdate(
             { symbol: sym },
-            { customPriceAlertStatus: 'TRIGGERED' }
+            { customPriceAlertEnabled: false, customPriceAlertStatus: 'TRIGGERED' }
           );
         } catch (dbErr) {
           logger.error(`Failed to save MarketEvent to database: ${dbErr.message}`);

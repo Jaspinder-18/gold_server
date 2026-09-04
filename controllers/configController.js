@@ -65,9 +65,9 @@ export const updateConfig = async (req, res) => {
     };
     pivotService.alertConfigs.set(targetSymbol, newAlertCfg);
 
-    // Re-arm custom level state if custom price or enabled state is updated
+    // Sync custom price alert in alertService memory
     if (customPriceAlertTarget !== undefined || customPriceAlertEnabled !== undefined) {
-      alertService.resetLevelState(targetSymbol, 'CUSTOM');
+      alertService.syncCustomAlertFromConfig(targetSymbol, newAlertCfg);
     }
 
     // Sync into symbolService in-memory catalog
