@@ -466,6 +466,7 @@ class ScreenshotService {
         currentPrice,
         tolerance,
         formattedDate,
+        timestamp,
         pivotConfig,
         candles: sessionCandles,
         decimals,
@@ -629,17 +630,7 @@ class ScreenshotService {
     });
 
     let levelsSvg = '';
-    // 1. Draw Reference Yellow Pivot Lines
-    levels.forEach(lvl => {
-      const ly = getY(lvl.price);
-      levelsSvg += `
-        <line x1="${chartLeft}" y1="${ly}" x2="${chartRight}" y2="${ly}" stroke="#ffd700" stroke-width="1.5" stroke-dasharray="6,4" />
-        <rect x="${chartRight + 6}" y="${ly - 10}" width="95" height="20" fill="#222631" rx="3" />
-        <text x="${chartRight + 53}" y="${ly + 4}" fill="#ffd700" font-size="11" font-weight="bold" font-family="sans-serif" text-anchor="middle">${lvl.name} $${Number(lvl.price).toFixed(decimals)}</text>
-      `;
-    });
-
-    // 2. Draw Solid WHITE Custom Price Line
+    // Draw ONLY Solid WHITE Custom Price Line (Zero Yellow Lines)
     if (customTargetPrice > 0) {
       const cy = getY(customTargetPrice);
       levelsSvg += `
@@ -649,11 +640,14 @@ class ScreenshotService {
       `;
     }
 
+    const formattedTimeStr = new Date(timestamp).toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+
     const topBarSvg = `
       <rect x="0" y="0" width="${width}" height="48" fill="#0c0d10" />
       <line x1="0" y1="48" x2="${width}" y2="48" stroke="#222631" stroke-width="1" />
       <text x="24" y="30" fill="#ffffff" font-size="15" font-weight="bold" font-family="sans-serif">${symConfig?.displayName || rawSym} · ${dynamicInterval} · ${dynamicRange}</text>
       <text x="320" y="30" fill="#787b86" font-size="13" font-family="sans-serif">Price: <tspan fill="#ffffff" font-weight="bold">$${Number(currentPrice).toFixed(decimals)}</tspan></text>
+      <text x="500" y="30" fill="#94a3b8" font-size="12" font-family="sans-serif">Time: <tspan fill="#f8fafc" font-weight="bold">${formattedTimeStr}</tspan></text>
       
       <rect x="${width - 360}" y="10" width="336" height="28" fill="${level === 'MANUAL' ? '#1e3a8a' : '#0f172a'}" rx="4" stroke="${level === 'MANUAL' ? '#3b82f6' : '#ffffff'}" stroke-width="1.5" />
       <text x="${width - 192}" y="29" fill="#ffffff" font-size="12" font-weight="bold" font-family="sans-serif" text-anchor="middle">${isTest ? '🧪 TEST: ' : '🎯 '}${level === 'MANUAL' ? 'MANUAL CHART CAPTURE' : `CUSTOM PRICE TOUCH @ $${Number(levelPrice || customTargetPrice).toFixed(decimals)}`}</text>
@@ -730,6 +724,7 @@ class ScreenshotService {
     currentPrice,
     tolerance,
     formattedDate,
+    timestamp = new Date(),
     pivotConfig = {},
     candles = [],
     decimals = 2,
@@ -967,8 +962,9 @@ class ScreenshotService {
             <span class="btn-sub">BUY</span>
           </div>
         </div>
-        <div class="indicator-tag">
-          <span>Pivots Fibonacci Daily</span>
+        <div style="font-size: 11px; font-family: -apple-system, BlinkMacSystemFont, Roboto, sans-serif; color: #94a3b8; margin-left: 10px; display: flex; align-items: center; gap: 4px;">
+          <span>🕒</span>
+          <span style="color: #ffffff; font-weight: 700;">${new Date(timestamp).toISOString().replace('T', ' ').slice(0, 19)} UTC</span>
         </div>
       </div>
 
@@ -987,12 +983,6 @@ class ScreenshotService {
 
     <!-- TradingView Chart Canvas Container -->
     <div id="chart_container">
-      <div class="chart-legend">
-        <div class="legend-title">
-          <span>Reference Pivots (${legendLevelsStr})</span>
-        </div>
-      </div>
-
       <!-- Watermark -->
       <div class="tv-watermark">
         <svg viewBox="0 0 36 28" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -1066,8 +1056,6 @@ class ScreenshotService {
     const rawData = ${JSON.stringify(candles)};
     candleSeries.setData(rawData);
 
-    // 1. Reference Pivot Levels in YELLOW
-    const levels = ${JSON.stringify(levels)};
     const customTargetPrice = Number(${Number(level === 'CUSTOM' ? levelPrice : (pivotConfig?.customPriceAlertTarget || 0))});
 
     // Dynamic zoom price scaling: Scale comfortably so candles and custom target are framed centered
@@ -1081,13 +1069,6 @@ class ScreenshotService {
       targetMin = Math.min(targetMin, customTargetPrice);
       targetMax = Math.max(targetMax, customTargetPrice);
     }
-
-    levels.forEach(l => {
-      if (Math.abs(l.price - baseVal) / baseVal < 0.02) {
-        targetMin = Math.min(targetMin, l.price);
-        targetMax = Math.max(targetMax, l.price);
-      }
-    });
 
     const pad = Math.max((targetMax - targetMin) * 0.08, baseVal * 0.001);
     const finalMin = parseFloat((targetMin - pad).toFixed(${decimals}));
@@ -1104,19 +1085,7 @@ class ScreenshotService {
       }
     });
 
-    // Draw Reference Pivot Lines in YELLOW
-    levels.forEach(lvl => {
-      candleSeries.createPriceLine({
-        price: lvl.price,
-        color: '#ffd700', // Reference Yellow
-        lineWidth: 1.5,
-        lineStyle: LightweightCharts.LineStyle.Dotted,
-        axisLabelVisible: true,
-        title: lvl.name + ' ($' + Number(lvl.price).toFixed(${decimals}) + ')'
-      });
-    });
-
-    // Draw Solid WHITE Custom Price Line
+    // Draw ONLY Solid WHITE Custom Price Line (Zero Yellow Lines)
     if (customTargetPrice > 0) {
       candleSeries.createPriceLine({
         price: customTargetPrice,
